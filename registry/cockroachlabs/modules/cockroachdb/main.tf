@@ -79,3 +79,102 @@ variable "share" {
     error_message = "share must be one of: owner, authenticated, public."
   }
 }
+
+locals {
+  sql_url = "postgres://root@localhost:${var.sql_port}/defaultdb?sslmode=disable"
+  env = {
+    database_url = { name = "DATABASE_URL", value = local.sql_url }
+    pghost       = { name = "PGHOST", value = "localhost" }
+    pgport       = { name = "PGPORT", value = tostring(var.sql_port) }
+    pguser       = { name = "PGUSER", value = "root" }
+    pgdatabase   = { name = "PGDATABASE", value = "defaultdb" }
+  }
+}
+
+resource "coder_env" "database_url" {
+  agent_id = var.agent_id
+  name     = local.env.database_url.name
+  value    = local.env.database_url.value
+}
+
+resource "coder_env" "pghost" {
+  agent_id = var.agent_id
+  name     = local.env.pghost.name
+  value    = local.env.pghost.value
+}
+
+resource "coder_env" "pgport" {
+  agent_id = var.agent_id
+  name     = local.env.pgport.name
+  value    = local.env.pgport.value
+}
+
+resource "coder_env" "pguser" {
+  agent_id = var.agent_id
+  name     = local.env.pguser.name
+  value    = local.env.pguser.value
+}
+
+resource "coder_env" "pgdatabase" {
+  agent_id = var.agent_id
+  name     = local.env.pgdatabase.name
+  value    = local.env.pgdatabase.value
+}
+
+resource "coder_script" "cockroachdb" {
+  agent_id           = var.agent_id
+  display_name       = "CockroachDB"
+  icon               = "/icon/database.svg"
+  run_on_start       = true
+  start_blocks_login = false
+  # Values are passed as env vars in a prelude, then run.sh is inlined verbatim.
+  # templatefile() would require escaping every bash ${...} and would stop
+  # ShellCheck from linting run.sh directly.
+  script = join("\n", [
+    "#!/usr/bin/env bash",
+    "export CRDB_VERSION=${jsonencode(var.crdb_version)}",
+    "export STORE_PATH=${jsonencode(var.store_path)}",
+    "export SQL_PORT=${jsonencode(tostring(var.sql_port))}",
+    "export HTTP_PORT=${jsonencode(tostring(var.http_port))}",
+    "export BINARY_URL=${jsonencode(var.binary_url)}",
+    file("${path.module}/run.sh"),
+  ])
+
+  lifecycle {
+    precondition {
+      condition     = var.sql_port != var.http_port
+      error_message = "sql_port and http_port must differ."
+    }
+  }
+}
+
+resource "coder_app" "db_console" {
+  agent_id     = var.agent_id
+  slug         = "crdb-console"
+  display_name = "CockroachDB Console"
+  url          = "http://localhost:${var.http_port}"
+  icon         = "/icon/database.svg"
+  subdomain    = var.subdomain
+  share        = var.share
+
+  healthcheck {
+    url       = "http://localhost:${var.http_port}/health?ready=1"
+    interval  = 5
+    threshold = 24
+  }
+}
+
+output "sql_url" {
+  value       = local.sql_url
+  description = "SQL connection URL for the workspace-local CockroachDB."
+}
+
+output "http_url" {
+  value       = "http://localhost:${var.http_port}"
+  description = "DB Console URL (inside the workspace)."
+}
+
+output "version" {
+  value       = var.crdb_version
+  description = "CockroachDB version installed by this module."
+}

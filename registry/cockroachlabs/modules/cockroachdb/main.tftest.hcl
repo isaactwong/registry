@@ -85,3 +85,69 @@ run "out_of_range_port_rejected" {
 
   expect_failures = [var.sql_port]
 }
+
+run "resources_configured" {
+  command = plan
+
+  variables {
+    agent_id = "test-agent-id"
+  }
+
+  assert {
+    condition     = coder_script.cockroachdb.agent_id == "test-agent-id" && coder_script.cockroachdb.run_on_start
+    error_message = "coder_script not wired correctly"
+  }
+
+  assert {
+    condition     = coder_script.cockroachdb.start_blocks_login == false
+    error_message = "coder_script must not block login"
+  }
+
+  assert {
+    condition     = coder_app.db_console.url == "http://localhost:26080" && coder_app.db_console.subdomain
+    error_message = "coder_app url/subdomain defaults incorrect"
+  }
+
+  assert {
+    condition     = coder_env.database_url.value == "postgres://root@localhost:26257/defaultdb?sslmode=disable"
+    error_message = "DATABASE_URL incorrect"
+  }
+}
+
+run "outputs_reflect_inputs" {
+  command = plan
+
+  variables {
+    agent_id     = "test-agent-id"
+    crdb_version = "v26.2.0"
+    sql_port     = 26300
+    http_port    = 26090
+  }
+
+  assert {
+    condition     = output.sql_url == "postgres://root@localhost:26300/defaultdb?sslmode=disable"
+    error_message = "sql_url should reflect sql_port"
+  }
+
+  assert {
+    condition     = output.http_url == "http://localhost:26090"
+    error_message = "http_url should reflect http_port"
+  }
+
+  assert {
+    condition     = output.version == "v26.2.0"
+    error_message = "version should reflect crdb_version"
+  }
+}
+
+run "port_collision_rejected" {
+  command = plan
+
+  variables {
+    agent_id  = "test-agent-id"
+    sql_port  = 26257
+    http_port = 26257
+  }
+
+  expect_failures = [coder_script.cockroachdb]
+}
