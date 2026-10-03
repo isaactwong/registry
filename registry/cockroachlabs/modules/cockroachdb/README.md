@@ -32,19 +32,27 @@ module "cockroachdb" {
 - `crdb-start` restarts the database if it was stopped.
 - `crdb-reset` stops the database, wipes the store, and starts a fresh cluster.
 
-The database runs in insecure mode on `localhost` only. It is not reachable
-from outside the workspace.
+The database runs in insecure mode. The SQL port listens on `localhost` only,
+so it is not reachable from outside the workspace.
+
+The DB Console is different. Coder proxies it through a `coder_app`, and in
+insecure mode it has no login. With the default `share = "owner"`, only the
+workspace owner can open it. Setting `share` to `authenticated` or `public`
+exposes an unauthenticated admin console: anyone it's shared with can read and
+change data. Leave `share` at `owner`.
 
 ## Examples
 
 ### Pin a CockroachDB version
+
+The module default is `v26.3.1`. To pin a specific version:
 
 ```tf
 module "cockroachdb" {
   source       = "registry.coder.com/cockroachlabs/cockroachdb/coder"
   version      = "1.0.0"
   agent_id     = coder_agent.main.id
-  crdb_version = "v26.2.0"
+  crdb_version = "v26.3.0"
 }
 ```
 
@@ -89,7 +97,9 @@ compatibility docs and MOLT Schema Conversion. -->
 ## Restricted networks
 
 After the binary is in place, CockroachDB makes no outbound connections.
-Diagnostics reporting is disabled by the module. The binary download is the
+Diagnostics reporting is disabled for clusters the module creates, including
+after `crdb-reset`. A store created elsewhere and pointed to with `store_path`
+keeps its own setting. The binary download is the
 only outbound request, and it happens only when that version isn't already
 on disk. You can remove it:
 
@@ -107,7 +117,9 @@ module "cockroachdb" {
 ```
 
 The mirror must serve `cockroach-<version>.linux-<arch>.tgz` and its
-`.sha256sum` with the same layout as `binaries.cockroachdb.com`.
+`.sha256sum`. The tarball must contain
+`cockroach-<version>.linux-<arch>/cockroach`. This is the same layout as
+`binaries.cockroachdb.com`.
 
 ## Host networking
 
@@ -131,6 +143,34 @@ not supported). The workspace image needs `curl`, plus `tar` and `sha256sum`
 unless `cockroach` is preinstalled. Other platforms fail at startup. For
 unsupported architectures the error points to
 [manual installation](https://www.cockroachlabs.com/docs/stable/install-cockroachdb).
+
+## Troubleshooting
+
+**Where to look.** The startup script runs in the background and doesn't block
+login, so the database may take a few seconds to come up after you log in. The
+script's output is in the Coder dashboard (the CockroachDB script log). The
+database log is `~/.local/share/cockroachdb/crdb.log`. Run `crdb-start` to
+start it again.
+
+**Port already in use.** The script fails with `CockroachDB exited before
+becoming ready.` and the log shows a bind error. Set `sql_port` and
+`http_port` in the module block (defaults 26257 and 26080).
+
+**Download blocked.** The script fails with `Could not download <url>. On
+restricted networks, set binary_url to an internal mirror or bake cockroach
+into the image.` See [Restricted networks](#restricted-networks).
+
+**Changed `crdb_version` and the database won't start.** An older version
+can't open a store created by a newer one, and CockroachDB upgrades one major
+version at a time. Go back to the previous version, or run `crdb-reset` to
+start fresh (this deletes all data).
+
+**Shared-network warning.** The script log shows `WARNING: this workspace may
+share its host's network`. See [Host networking](#host-networking).
+
+**Starting over.** `crdb-reset` stops the database and **deletes all data** in
+the store, then starts a fresh cluster. It refuses unsafe store paths:
+relative paths, `$HOME`, `/`, or the module's own state directory.
 
 ## Not covered by this module
 
