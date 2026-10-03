@@ -78,12 +78,27 @@ else
       echo "Could not download $URL. On restricted networks, set binary_url to an internal mirror or bake cockroach into the image." >&2
       exit 1
     }
-    curl -fsSL -o "$WORK/$TARBALL.sha256sum" "$URL.sha256sum"
-    (cd "$WORK" && sha256sum -c "$TARBALL.sha256sum")
+    curl -fsSL -o "$WORK/$TARBALL.sha256sum" "$URL.sha256sum" || {
+      echo "Could not download $URL.sha256sum. A binary_url mirror must also serve the .sha256sum file next to the tarball." >&2
+      exit 1
+    }
+    (cd "$WORK" && sha256sum -c "$TARBALL.sha256sum") || {
+      echo "Checksum verification failed for $URL. The download may be corrupt, or the mirror may be out of date." >&2
+      exit 1
+    }
 
+    # Extract into the temp dir, then copy and rename within the final
+    # directory so an interrupted run never leaves a partial binary in place.
     mkdir -p "$(dirname "$BINARY_PATH")"
-    tar -xzf "$WORK/$TARBALL" -C "$(dirname "$BINARY_PATH")" --strip-components=1 \
-      "cockroach-${CRDB_VERSION}.linux-${ARCH}/cockroach"
+    if ! tar -xzf "$WORK/$TARBALL" -C "$WORK" --strip-components=1 \
+      "cockroach-${CRDB_VERSION}.linux-${ARCH}/cockroach" \
+      || ! cp "$WORK/cockroach" "$BINARY_PATH.partial" \
+      || ! chmod +x "$BINARY_PATH.partial" \
+      || ! mv -f "$BINARY_PATH.partial" "$BINARY_PATH"; then
+      rm -f "$BINARY_PATH.partial"
+      echo "Failed to extract cockroach to $BINARY_PATH. Check free disk space and permissions, then re-run." >&2
+      exit 1
+    fi
   fi
 
   ln -sf "$BINARY_PATH" "$BIN_DIR/cockroach"
@@ -94,7 +109,19 @@ cat > "$BIN_DIR/crdb-start" << EOF
 #!/usr/bin/env bash
 set -euo pipefail
 PID_FILE="$PID_FILE"
-if [[ -f "\$PID_FILE" ]] && kill -0 "\$(cat "\$PID_FILE")" 2> /dev/null; then
+# True only if the PID is alive and its command line is a CockroachDB server,
+# so a PID reused by an unrelated process is never mistaken for the database.
+crdb_running() {
+  local cmd
+  kill -0 "\$1" 2> /dev/null || return 1
+  if [[ -r "/proc/\$1/cmdline" ]]; then
+    cmd="\$(tr '\\0' ' ' < "/proc/\$1/cmdline" 2> /dev/null || true)"
+  else
+    cmd="\$(ps -p "\$1" -o args= 2> /dev/null || true)"
+  fi
+  [[ "\$cmd" == *start-single-node* ]]
+}
+if [[ -f "\$PID_FILE" ]] && crdb_running "\$(cat "\$PID_FILE")"; then
   echo "CockroachDB already running (PID \$(cat "\$PID_FILE"))."
   exit 0
 fi
@@ -109,11 +136,18 @@ COCKROACH_SKIP_ENABLING_DIAGNOSTIC_REPORTING=true nohup "$BINARY_PATH" start-sin
   --http-addr="localhost:$HTTP_PORT" \\
   --pid-file="\$PID_FILE" \\
   >> "$LOG_FILE" 2>&1 &
+CHILD=\$!
 TIMEOUT="\${READY_TIMEOUT:-$READY_TIMEOUT}"
 for _ in \$(seq 1 "\$TIMEOUT"); do
   if curl -fsS "http://localhost:$HTTP_PORT/health?ready=1" > /dev/null 2>&1; then
     echo "CockroachDB ready: SQL localhost:$SQL_PORT | Console http://localhost:$HTTP_PORT"
     exit 0
+  fi
+  if ! kill -0 "\$CHILD" 2> /dev/null; then
+    echo "CockroachDB exited before becoming ready. Last log lines:" >&2
+    tail -n 20 "$LOG_FILE" >&2 || true
+    echo "Full log: $LOG_FILE" >&2
+    exit 1
   fi
   sleep 1
 done
@@ -130,13 +164,30 @@ cat > "$BIN_DIR/crdb-reset" << EOF
 set -euo pipefail
 PID_FILE="$PID_FILE"
 STORE_PATH="$STORE_PATH"
+STATE_DIR="\$HOME/.local/share/cockroachdb"
 case "\$STORE_PATH" in
-  "" | "/" | "\$HOME" | "\$HOME/")
+  "" | "/" | "\$HOME" | "\$HOME/" | "\$STATE_DIR" | "\$STATE_DIR"/*)
     echo "Refusing to wipe store path '\$STORE_PATH'." >&2
     exit 1
     ;;
+  /*) ;;
+  *)
+    echo "Refusing to wipe relative store path '\$STORE_PATH'." >&2
+    exit 1
+    ;;
 esac
-if [[ -f "\$PID_FILE" ]] && kill -0 "\$(cat "\$PID_FILE")" 2> /dev/null; then
+# True only if the PID is alive and its command line is a CockroachDB server.
+crdb_running() {
+  local cmd
+  kill -0 "\$1" 2> /dev/null || return 1
+  if [[ -r "/proc/\$1/cmdline" ]]; then
+    cmd="\$(tr '\\0' ' ' < "/proc/\$1/cmdline" 2> /dev/null || true)"
+  else
+    cmd="\$(ps -p "\$1" -o args= 2> /dev/null || true)"
+  fi
+  [[ "\$cmd" == *start-single-node* ]]
+}
+if [[ -f "\$PID_FILE" ]] && crdb_running "\$(cat "\$PID_FILE")"; then
   PID="\$(cat "\$PID_FILE")"
   echo "Stopping CockroachDB (PID \$PID)..."
   kill "\$PID"
@@ -157,4 +208,9 @@ EOF
 chmod +x "$BIN_DIR/crdb-reset"
 
 # --- Start ----------------------------------------------------------------
+# exec skips the EXIT trap, so clean up the download temp dir explicitly.
+if [[ -n "${WORK:-}" ]]; then
+  rm -rf "$WORK"
+fi
+trap - EXIT
 exec "$BIN_DIR/crdb-start"

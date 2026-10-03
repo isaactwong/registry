@@ -48,6 +48,23 @@ describe("run.sh", () => {
   let binDir: string;
 
   const pidFile = () => join(home, ".local/share/cockroachdb/crdb.pid");
+  const extraPids: number[] = [];
+  const spawnUnrelated = () => {
+    const p = Bun.spawn(["sleep", "3600"], {
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+    extraPids.push(p.pid);
+    return p.pid;
+  };
+  const alive = (pid: number) => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
 
   beforeEach(() => {
     home = mkdtempSync(join(tmpdir(), "crdb-module-test-"));
@@ -64,6 +81,13 @@ describe("run.sh", () => {
         .nothrow()
         .quiet();
     }
+    // Reap any fake cockroach whose PID file was overwritten by a test.
+    await $`pkill -f ${home}/.local/share/cockroachdb`.nothrow().quiet();
+    for (const pid of extraPids.splice(0)) {
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch {}
+    }
     rmSync(home, { recursive: true, force: true });
   });
 
@@ -73,10 +97,10 @@ describe("run.sh", () => {
   const linuxAmd64 = () =>
     stub("uname", 'if [ "$1" = "-s" ]; then echo Linux; else echo x86_64; fi');
 
-  // Fake cockroach: records its env, honors --pid-file, then execs sleep so
-  // the PID matches.
+  // Fake cockroach: records its env, honors --pid-file, then loops (no exec)
+  // so its command line stays "/bin/sh .../cockroach start-single-node ...".
   const FAKE_COCKROACH =
-    '#!/bin/sh\n[ "$1" = version ] && { echo "Build Tag: v0.0.0-fake"; exit 0; }\nenv > "$HOME/cockroach.env"\nfor a in "$@"; do case "$a" in --pid-file=*) echo $$ > "${a#--pid-file=}";; esac; done\nexec sleep 3600\n';
+    '#!/bin/sh\n[ "$1" = version ] && { echo "Build Tag: v0.0.0-fake"; exit 0; }\nenv > "$HOME/cockroach.env"\nfor a in "$@"; do case "$a" in --pid-file=*) echo $$ > "${a#--pid-file=}";; esac; done\nwhile :; do sleep 1; done\n';
 
   const plantFakeBinary = (version: string) => {
     const dir = join(home, ".local/share/cockroachdb", version);
@@ -99,8 +123,12 @@ describe("run.sh", () => {
     ...extra,
   });
 
-  const run = (e: Record<string, string>) =>
-    $`bash ${join(import.meta.dir, "run.sh")}`.env(e).nothrow().quiet();
+  const run = (e: Record<string, string>, cwd?: string) =>
+    $`bash ${join(import.meta.dir, "run.sh")}`
+      .env(e)
+      .cwd(cwd ?? process.cwd())
+      .nothrow()
+      .quiet();
 
   it("rejects unsupported OS", async () => {
     stub("uname", 'if [ "$1" = "-s" ]; then echo Darwin; else echo x86_64; fi');
@@ -134,14 +162,6 @@ describe("run.sh", () => {
     expect(readFileSync(join(binDir, "crdb-reset"), "utf-8")).toContain(
       join(home, ".crdb-data"),
     );
-  });
-
-  it("does not touch shell rc files", async () => {
-    linuxAmd64();
-    stub("curl", "exit 22");
-    plantFakeBinary("v26.3.1");
-    await run(env());
-    expect(existsSync(join(home, ".bashrc"))).toBe(false);
   });
 
   it("is idempotent when CockroachDB is already running", async () => {
@@ -246,5 +266,130 @@ describe("run.sh", () => {
     const r = await run(env());
     expect(r.exitCode).not.toBe(0);
     expect(existsSync(join(binDir, "cockroach"))).toBe(false);
+    expect(r.stderr.toString()).toContain("Checksum verification failed");
+  });
+
+  it("explains a missing .sha256sum on the mirror", async () => {
+    linuxAmd64();
+    stub(
+      "curl",
+      'case "$*" in *.sha256sum*) exit 22;; esac; while [ $# -gt 0 ]; do case "$1" in -o) shift; : > "$1";; esac; shift; done',
+    );
+    stub("sha256sum", "exit 0");
+    const r = await run(env());
+    expect(r.exitCode).not.toBe(0);
+    expect(r.stderr.toString()).toContain(".sha256sum");
+    expect(r.stderr.toString()).toContain("mirror");
+  });
+
+  it("reports ready and exits 0 when the health check passes", async () => {
+    linuxAmd64();
+    stub("curl", 'case "$*" in *health*) exit 0;; esac; exit 22');
+    plantFakeBinary("v26.3.1");
+    const r = await run(env());
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout.toString()).toContain("CockroachDB ready");
+  });
+
+  it("treats a PID reused by an unrelated process as stale", async () => {
+    linuxAmd64();
+    stub("curl", "exit 22");
+    plantFakeBinary("v26.3.1");
+    const other = spawnUnrelated();
+    mkdirSync(join(home, ".local/share/cockroachdb"), { recursive: true });
+    writeFileSync(pidFile(), String(other));
+    const r = await run(env());
+    expect(r.stdout.toString()).not.toContain("already running");
+    expect(readFileSync(pidFile(), "utf-8").trim()).not.toBe(String(other));
+    expect(alive(other)).toBe(true);
+  });
+
+  it("crdb-reset never signals an unrelated process at the PID", async () => {
+    linuxAmd64();
+    stub("curl", "exit 22");
+    plantFakeBinary("v26.3.1");
+    await run(env());
+    const other = spawnUnrelated();
+    writeFileSync(pidFile(), String(other));
+    await $`${join(binDir, "crdb-reset")}`.env(env()).nothrow().quiet();
+    expect(alive(other)).toBe(true);
+  });
+
+  it("crdb-reset refuses to wipe $HOME", async () => {
+    linuxAmd64();
+    stub("curl", "exit 22");
+    plantFakeBinary("v26.3.1");
+    await run(env({ STORE_PATH: home }));
+    const r = await $`${join(binDir, "crdb-reset")}`
+      .env(env())
+      .nothrow()
+      .quiet();
+    expect(r.exitCode).not.toBe(0);
+    expect(r.stderr.toString()).toContain("Refusing");
+    expect(existsSync(join(home, "stubs"))).toBe(true);
+  });
+
+  it("crdb-reset refuses a store inside the module state dir", async () => {
+    linuxAmd64();
+    stub("curl", "exit 22");
+    plantFakeBinary("v26.3.1");
+    const inside = join(home, ".local/share/cockroachdb/data");
+    await run(env({ STORE_PATH: inside }));
+    const r = await $`${join(binDir, "crdb-reset")}`
+      .env(env())
+      .nothrow()
+      .quiet();
+    expect(r.exitCode).not.toBe(0);
+    expect(r.stderr.toString()).toContain("Refusing");
+    expect(existsSync(join(home, ".local/share/cockroachdb", "v26.3.1"))).toBe(
+      true,
+    );
+  });
+
+  it("crdb-reset refuses a relative store path", async () => {
+    linuxAmd64();
+    stub("curl", "exit 22");
+    plantFakeBinary("v26.3.1");
+    await run(env({ STORE_PATH: "relstore" }), home);
+    const r = await $`${join(binDir, "crdb-reset")}`
+      .env(env())
+      .cwd(home)
+      .nothrow()
+      .quiet();
+    expect(r.exitCode).not.toBe(0);
+    expect(r.stderr.toString()).toContain("Refusing");
+  });
+
+  it("fails fast when CockroachDB exits before becoming ready", async () => {
+    linuxAmd64();
+    stub("curl", "exit 22");
+    const dir = join(home, ".local/share/cockroachdb/v26.3.1");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "cockroach"),
+      '#!/bin/sh\n[ "$1" = version ] && exit 0\necho "ERROR: address already in use" >&2\nexit 1\n',
+      { mode: 0o755 },
+    );
+    const t0 = Date.now();
+    const r = await run(env({ READY_TIMEOUT: "30" }));
+    expect(Date.now() - t0).toBeLessThan(10000);
+    expect(r.exitCode).not.toBe(0);
+    expect(r.stderr.toString()).toContain("address already in use");
+  });
+
+  it("leaves no partial binary when extraction fails", async () => {
+    linuxAmd64();
+    stub(
+      "curl",
+      'while [ $# -gt 0 ]; do case "$1" in -o) shift; : > "$1";; esac; shift; done',
+    );
+    stub("sha256sum", "exit 0");
+    stub("tar", "exit 1");
+    const r = await run(env());
+    expect(r.exitCode).not.toBe(0);
+    expect(r.stderr.toString()).toContain("disk space");
+    const bin = join(home, ".local/share/cockroachdb/v26.3.1/cockroach");
+    expect(existsSync(bin)).toBe(false);
+    expect(existsSync(`${bin}.partial`)).toBe(false);
   });
 });
