@@ -36,10 +36,8 @@ The database runs in insecure mode. The SQL port listens on `localhost` only,
 so it is not reachable from outside the workspace.
 
 The DB Console is different. Coder proxies it through a `coder_app`, and in
-insecure mode it has no login. With the default `share = "owner"`, only the
-workspace owner can open it. Setting `share` to `authenticated` or `public`
-exposes an unauthenticated admin console: anyone it's shared with can read and
-change data. Leave `share` at `owner`.
+this insecure dev mode it has no login. The module therefore always limits the
+console to the workspace owner (and Coder site admins).
 
 ## Examples
 

@@ -26,8 +26,13 @@ variable "crdb_version" {
 
 variable "store_path" {
   type        = string
-  description = "Persistent store path inside the workspace. Empty resolves to $HOME/.crdb-data. Must be on a persistent volume for data to survive workspace restarts."
+  description = "Absolute path of a directory dedicated to CockroachDB, inside the workspace. Empty resolves to $HOME/.crdb-data. Must be on a persistent volume for data to survive workspace restarts. crdb-reset deletes its contents."
   default     = ""
+
+  validation {
+    condition     = can(regex("^(/[^~]*)?$", var.store_path))
+    error_message = "store_path must be empty or an absolute path (starting with /) that does not contain ~."
+  }
 }
 
 variable "sql_port" {
@@ -67,17 +72,6 @@ variable "subdomain" {
   type        = bool
   description = "Serve the DB Console on a Coder subdomain. Requires a wildcard access URL on the Coder deployment."
   default     = true
-}
-
-variable "share" {
-  type        = string
-  description = "coder_app share visibility. One of: owner, authenticated, public."
-  default     = "owner"
-
-  validation {
-    condition     = contains(["owner", "authenticated", "public"], var.share)
-    error_message = "share must be one of: owner, authenticated, public."
-  }
 }
 
 locals {
@@ -155,7 +149,7 @@ resource "coder_app" "db_console" {
   url          = "http://localhost:${var.http_port}"
   icon         = "/icon/database.svg"
   subdomain    = var.subdomain
-  share        = var.share
+  share        = "owner" # The console has no login in insecure mode.
 
   healthcheck {
     url       = "http://localhost:${var.http_port}/health?ready=1"

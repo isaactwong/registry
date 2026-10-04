@@ -13,6 +13,10 @@ set -euo pipefail
 : "${CODER_SCRIPT_BIN_DIR:=$HOME/.local/bin}"
 
 [[ -n "$STORE_PATH" ]] || STORE_PATH="$HOME/.crdb-data"
+if [[ "$STORE_PATH" != /* ]]; then
+  echo "store_path must be an absolute path, got '$STORE_PATH'." >&2
+  exit 1
+fi
 BIN_DIR="$CODER_SCRIPT_BIN_DIR"
 STATE_DIR="$HOME/.local/share/cockroachdb"
 PID_FILE="$STATE_DIR/crdb.pid"

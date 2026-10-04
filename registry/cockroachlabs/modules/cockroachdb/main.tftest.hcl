@@ -21,7 +21,7 @@ run "defaults" {
   }
 
   assert {
-    condition     = var.subdomain == true && var.share == "owner"
+    condition     = var.subdomain == true
     error_message = "app defaults incorrect"
   }
 
@@ -64,15 +64,35 @@ run "empty_version_rejected" {
   expect_failures = [var.crdb_version]
 }
 
-run "invalid_share_rejected" {
+run "relative_store_path_rejected" {
   command = plan
 
   variables {
-    agent_id = "test-agent-id"
-    share    = "private"
+    agent_id   = "test-agent-id"
+    store_path = "data/crdb"
   }
 
-  expect_failures = [var.share]
+  expect_failures = [var.store_path]
+}
+
+run "tilde_store_path_rejected" {
+  command = plan
+
+  variables {
+    agent_id   = "test-agent-id"
+    store_path = "/home/coder/~/crdb"
+  }
+
+  expect_failures = [var.store_path]
+}
+
+run "absolute_store_path_accepted" {
+  command = plan
+
+  variables {
+    agent_id   = "test-agent-id"
+    store_path = "/data/crdb"
+  }
 }
 
 run "out_of_range_port_rejected" {
@@ -106,6 +126,11 @@ run "resources_configured" {
   assert {
     condition     = coder_app.db_console.url == "http://localhost:26080" && coder_app.db_console.subdomain
     error_message = "coder_app url/subdomain defaults incorrect"
+  }
+
+  assert {
+    condition     = coder_app.db_console.share == "owner"
+    error_message = "DB Console must always be owner-only"
   }
 
   assert {

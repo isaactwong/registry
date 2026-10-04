@@ -144,6 +144,13 @@ describe("run.sh", () => {
     expect(r.stderr.toString()).toContain("Unsupported arch");
   });
 
+  it("rejects a relative store path", async () => {
+    linuxAmd64();
+    const r = await run(env({ STORE_PATH: "relstore" }));
+    expect(r.exitCode).not.toBe(0);
+    expect(r.stderr.toString()).toContain("must be an absolute path");
+  });
+
   it("links cockroach and helpers into CODER_SCRIPT_BIN_DIR", async () => {
     linuxAmd64();
     stub("curl", "exit 22");
@@ -344,20 +351,6 @@ describe("run.sh", () => {
     expect(existsSync(join(home, ".local/share/cockroachdb", "v26.3.1"))).toBe(
       true,
     );
-  });
-
-  it("crdb-reset refuses a relative store path", async () => {
-    linuxAmd64();
-    stub("curl", "exit 22");
-    plantFakeBinary("v26.3.1");
-    await run(env({ STORE_PATH: "relstore" }), home);
-    const r = await $`${join(binDir, "crdb-reset")}`
-      .env(env())
-      .cwd(home)
-      .nothrow()
-      .quiet();
-    expect(r.exitCode).not.toBe(0);
-    expect(r.stderr.toString()).toContain("Refusing");
   });
 
   it("fails fast when CockroachDB exits before becoming ready", async () => {
