@@ -78,6 +78,7 @@ describe("run.sh", () => {
     mkdirSync(stubs, { recursive: true });
     mkdirSync(binDir, { recursive: true });
     mkdirSync(join(home, "net"), { recursive: true });
+    mkdirSync(join(home, "libc-empty"), { recursive: true });
   });
 
   afterEach(async () => {
@@ -125,6 +126,8 @@ describe("run.sh", () => {
     READY_TIMEOUT: "1",
     // Empty fake /sys/class/net so the host's own interfaces don't leak in.
     NET_SYS_DIR: join(home, "net"),
+    // Empty fake /lib so a musl installed on the host can't leak in.
+    LIBC_PROBE_DIR: join(home, "libc-empty"),
     ...extra,
   });
 
@@ -607,6 +610,9 @@ describe("run.sh", () => {
     linuxAmd64();
     stub("sha256sum", "exit 0");
     stub("curl", 'echo "$@" >> "$HOME/curl.log"; exit 22');
+    // No glibc signal, whatever the host has.
+    stub("getconf", "exit 1");
+    stub("ldd", 'echo "musl libc (x86_64)" >&2; exit 1');
     const libc = join(home, "libc");
     mkdirSync(libc);
     writeFileSync(join(libc, "ld-musl-x86_64.so.1"), "");
@@ -614,6 +620,35 @@ describe("run.sh", () => {
     expect(r.exitCode).not.toBe(0);
     expect(r.stderr.toString()).toContain("glibc");
     expect(existsSync(join(home, "curl.log"))).toBe(false);
+  });
+
+  it("does not mistake a glibc system with musl installed for musl", async () => {
+    linuxAmd64();
+    stub("sha256sum", "exit 0");
+    stub("curl", 'echo "$@" >> "$HOME/curl.log"; exit 22');
+    stub("getconf", 'echo "glibc 2.36"');
+    stub("ldd", "exit 1");
+    const libc = join(home, "libc");
+    mkdirSync(libc);
+    writeFileSync(join(libc, "ld-musl-x86_64.so.1"), "");
+    const r = await run(env({ LIBC_PROBE_DIR: libc }));
+    expect(r.stderr.toString()).not.toContain("uses musl libc");
+    // It went on to the download, which the stub fails.
+    expect(r.stderr.toString()).toContain("Could not download");
+  });
+
+  it("recognizes glibc from ldd when getconf has no answer", async () => {
+    linuxAmd64();
+    stub("sha256sum", "exit 0");
+    stub("curl", "exit 22");
+    stub("getconf", "exit 1");
+    stub("ldd", 'echo "ldd (Debian GLIBC 2.36-9) 2.36"');
+    const libc = join(home, "libc");
+    mkdirSync(libc);
+    writeFileSync(join(libc, "ld-musl-x86_64.so.1"), "");
+    const r = await run(env({ LIBC_PROBE_DIR: libc }));
+    expect(r.stderr.toString()).not.toContain("uses musl libc");
+    expect(r.stderr.toString()).toContain("Could not download");
   });
 
   it("reports a disk-full download write error", async () => {

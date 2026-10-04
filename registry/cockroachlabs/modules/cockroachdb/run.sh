@@ -79,9 +79,17 @@ else
       }
     done
 
-    # CockroachDB's Linux binaries are linked against glibc.
+    # CockroachDB's Linux binaries are linked against glibc. Detect glibc
+    # first: a Debian or Ubuntu image with the musl package installed has
+    # ld-musl-* files but is still glibc.
     LDD_OUT="$(ldd --version 2>&1 || true)"
-    if compgen -G "$LIBC_PROBE_DIR/ld-musl-*" > /dev/null || [[ "$LDD_OUT" == *musl* ]]; then
+    IS_GLIBC=0
+    if getconf GNU_LIBC_VERSION > /dev/null 2>&1 \
+      || [[ "$LDD_OUT" == *GLIBC* || "$LDD_OUT" == *"GNU libc"* ]]; then
+      IS_GLIBC=1
+    fi
+    if [[ "$IS_GLIBC" -eq 0 ]] \
+      && { compgen -G "$LIBC_PROBE_DIR/ld-musl-*" > /dev/null || [[ "$LDD_OUT" == *musl* ]]; }; then
       echo "This system uses musl libc (for example Alpine), and CockroachDB's Linux binaries need glibc. Use a glibc-based image such as Debian, Ubuntu, or UBI, or bake a compatible cockroach into the image." >&2
       exit 1
     fi
