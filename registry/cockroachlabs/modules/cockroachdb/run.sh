@@ -150,10 +150,21 @@ else
       exit 1
     fi
 
-    # Remove other downloaded versions (v* directories only).
+    # Remove other downloaded versions (v* directories only), unless a running
+    # CockroachDB (per the PID file) may still be using an old version's files.
+    RUNNING_PID="$(cat "$PID_FILE" 2> /dev/null || true)"
+    RUNNING_CMD=""
+    if [[ -n "$RUNNING_PID" ]] && kill -0 "$RUNNING_PID" 2> /dev/null; then
+      if [[ -r "/proc/$RUNNING_PID/cmdline" ]]; then
+        RUNNING_CMD="$(tr '\0' ' ' < "/proc/$RUNNING_PID/cmdline" 2> /dev/null || true)"
+      else
+        RUNNING_CMD="$(ps -p "$RUNNING_PID" -o args= 2> /dev/null || true)"
+      fi
+    fi
     for old in "$STATE_DIR"/v*; do
       [[ -d "$old" && "$old" != "$VERSION_DIR" ]] || continue
       [[ "$old" != "$STORE_PATH" && "$STORE_PATH" != "$old"/* ]] || continue
+      [[ "$RUNNING_CMD" != *start-single-node* ]] || continue
       rm -rf "$old"
     done
   fi
@@ -182,8 +193,13 @@ mv -f "$CONFIG_FILE.tmp" "$CONFIG_FILE"
 cat > "$BIN_DIR/crdb-start" << 'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+CONFIG_FILE="$HOME/.local/share/cockroachdb/config.env"
+if [[ ! -f "$CONFIG_FILE" ]]; then
+  echo "CockroachDB module config not found at $CONFIG_FILE. Restart the workspace to reinstall." >&2
+  exit 1
+fi
 # shellcheck source=/dev/null
-source "$HOME/.local/share/cockroachdb/config.env"
+source "$CONFIG_FILE"
 # True only if the PID is alive and its command line is a CockroachDB server,
 # so a PID reused by an unrelated process is never mistaken for the database.
 crdb_running() {
@@ -242,8 +258,13 @@ chmod +x "$BIN_DIR/crdb-start"
 cat > "$BIN_DIR/crdb-reset" << 'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+CONFIG_FILE="$HOME/.local/share/cockroachdb/config.env"
+if [[ ! -f "$CONFIG_FILE" ]]; then
+  echo "CockroachDB module config not found at $CONFIG_FILE. Restart the workspace to reinstall." >&2
+  exit 1
+fi
 # shellcheck source=/dev/null
-source "$HOME/.local/share/cockroachdb/config.env"
+source "$CONFIG_FILE"
 
 refuse() {
   echo "Refusing to wipe '$STORE_PATH': $1" >&2

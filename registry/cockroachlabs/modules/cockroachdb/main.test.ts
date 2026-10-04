@@ -142,7 +142,7 @@ describe("run.sh", () => {
     linuxAmd64();
     stub("curl", 'case "$*" in *health*) exit 0;; esac; exit 22');
     plantFakeBinary("v26.3.1");
-    const store = join(home, "my data", "$x");
+    const store = join(home, "my data", "it's $x");
     const state = await runTerraformApply(import.meta.dir, {
       agent_id: "foo",
       sql_port: 26300,
@@ -770,6 +770,47 @@ describe("run.sh", () => {
     expect(existsSync(join(state, "config.env"))).toBe(true);
     expect(existsSync(pidFile())).toBe(true);
   });
+
+  it("keeps old versions while a CockroachDB process may still use them", async () => {
+    linuxAmd64();
+    await serveTarball(true);
+    const state = join(home, ".local/share/cockroachdb");
+    const oldDir = join(state, "v26.2.0");
+    mkdirSync(oldDir, { recursive: true });
+    writeFileSync(join(oldDir, "cockroach"), FAKE_COCKROACH, { mode: 0o755 });
+    const p = Bun.spawn(
+      [
+        "sh",
+        join(oldDir, "cockroach"),
+        "start-single-node",
+        `--pid-file=${pidFile()}`,
+      ],
+      { stdout: "ignore", stderr: "ignore" },
+    );
+    extraPids.push(p.pid);
+    for (let i = 0; i < 50 && !existsSync(pidFile()); i++) await Bun.sleep(100);
+    expect(existsSync(pidFile())).toBe(true);
+    const r = await run(env());
+    expect(r.exitCode).toBe(0);
+    expect(existsSync(join(state, "v26.3.1/cockroach"))).toBe(true);
+    expect(existsSync(join(oldDir, "cockroach"))).toBe(true);
+  });
+
+  it.each(["crdb-start", "crdb-reset"])(
+    "%s explains a missing config.env",
+    async (helper) => {
+      linuxAmd64();
+      stub("curl", "exit 22");
+      plantFakeBinary("v26.3.1");
+      await run(env());
+      rmSync(configFile());
+      const r = await $`${join(binDir, helper)}`.env(env()).nothrow().quiet();
+      expect(r.exitCode).toBe(1);
+      expect(r.stderr.toString()).toContain(
+        `CockroachDB module config not found at ${configFile()}. Restart the workspace to reinstall.`,
+      );
+    },
+  );
 
   it("keeps other versions when no download happens", async () => {
     linuxAmd64();
