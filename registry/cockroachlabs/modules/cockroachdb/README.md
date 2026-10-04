@@ -111,6 +111,9 @@ download:
 
 - **Bake it into the image.** If `cockroach` is already on the image's `PATH`,
   the module uses it and skips the download (`crdb_version` is ignored).
+  A baked-in `cockroach` must be the real binary, or a wrapper that `exec`s
+  it, because the module checks that the started process is the one
+  CockroachDB records.
 - **Use an internal mirror:**
 
 ```tf
@@ -230,14 +233,16 @@ relative paths, paths with `.` or `..` segments, `$HOME` or any parent of it,
 `/`, and the module's own state directory. It also refuses a non-empty
 directory that doesn't look like a CockroachDB store. A top-level `lost+found`
 (present on a dedicated ext4 volume) is ignored and kept. `crdb-reset` also
-works after a failed first start, when the directory holds only `logs` or
-`cockroach-temp*` entries. A `store_path` that is a symlink is followed, and the
+works after a failed first start, when the directory holds only
+`cockroach-temp*` entries, `temp-dirs-record.txt`, and `logs`. A `logs`
+directory counts only when it holds `cockroach.log` or sits beside one of the
+temp entries. A `store_path` that is a symlink is followed, and the
 link itself is kept.
 
-If a database answers on the console port but the PID file is missing,
-`crdb-reset` stops with `CockroachDB appears to be running on port <http_port>
-but its PID file is missing; stop it first.` Stop that process, then run
-`crdb-reset` again.
+If a database answers on the console port but not as the process recorded in
+the PID file, `crdb-reset` stops with `CockroachDB is answering on port
+<http_port>, but not as the process recorded in <pid_file>; stop it first.`
+Stop that process, then run `crdb-reset` again.
 
 ## Not covered by this module
 

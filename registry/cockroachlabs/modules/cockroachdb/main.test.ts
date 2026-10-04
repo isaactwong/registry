@@ -76,6 +76,11 @@ describe("run.sh", () => {
     stubs = join(home, "stubs");
     binDir = join(home, "coder-bin");
     mkdirSync(stubs, { recursive: true });
+    // Host-independent libc detection; tests override these as needed.
+    writeFileSync(join(stubs, "getconf"), '#!/bin/sh\necho "glibc 2.36"\n', {
+      mode: 0o755,
+    });
+    writeFileSync(join(stubs, "ldd"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
     mkdirSync(binDir, { recursive: true });
     mkdirSync(join(home, "net"), { recursive: true });
     mkdirSync(join(home, "libc-empty"), { recursive: true });
@@ -543,10 +548,54 @@ describe("run.sh", () => {
     mkdirSync(join(store, "logs"), { recursive: true });
     writeFileSync(join(store, "logs", "cockroach.log"), "x");
     mkdirSync(join(store, "cockroach-temp123"));
+    writeFileSync(join(store, "temp-dirs-record.txt"), "x");
     await run(env({ STORE_PATH: store }));
     const r = await reset();
     expect(r.stdout.toString()).toContain("wiped");
     expect(existsSync(join(store, "logs"))).toBe(false);
+    expect(existsSync(join(store, "temp-dirs-record.txt"))).toBe(false);
+  });
+
+  it("crdb-reset refuses a directory holding only logs and an unrelated file", async () => {
+    linuxAmd64();
+    stub("curl", "exit 22");
+    plantFakeBinary("v26.3.1");
+    const store = join(home, "logsonly");
+    mkdirSync(join(store, "logs"), { recursive: true });
+    writeFileSync(join(store, "logs", "app.txt"), "x");
+    writeFileSync(join(store, "precious"), "x");
+    await run(env({ STORE_PATH: store }));
+    const r = await reset();
+    expect(r.exitCode).not.toBe(0);
+    expect(r.stderr.toString()).toContain("Refusing");
+    expect(existsSync(join(store, "precious"))).toBe(true);
+  });
+
+  it("crdb-reset refuses a directory whose only entry is an unrelated logs dir", async () => {
+    linuxAmd64();
+    stub("curl", "exit 22");
+    plantFakeBinary("v26.3.1");
+    const store = join(home, "logsalone");
+    mkdirSync(join(store, "logs"), { recursive: true });
+    writeFileSync(join(store, "logs", "app.txt"), "x");
+    await run(env({ STORE_PATH: store }));
+    const r = await reset();
+    expect(r.exitCode).not.toBe(0);
+    expect(r.stderr.toString()).toContain("Refusing");
+    expect(existsSync(join(store, "logs", "app.txt"))).toBe(true);
+  });
+
+  it("crdb-reset accepts logs/cockroach.log as evidence of a failed start", async () => {
+    linuxAmd64();
+    stub("curl", "exit 22");
+    plantFakeBinary("v26.3.1");
+    const store = join(home, "logsok");
+    mkdirSync(join(store, "logs"), { recursive: true });
+    writeFileSync(join(store, "logs", "cockroach.log"), "x");
+    await run(env({ STORE_PATH: store }));
+    const r = await reset();
+    expect(r.stdout.toString()).toContain("wiped");
+    expect(existsSync(join(store, "logs", "cockroach.log"))).toBe(false);
   });
 
   it("crdb-reset accepts a store identified by its version file", async () => {
@@ -576,9 +625,28 @@ describe("run.sh", () => {
     const r = await reset();
     expect(r.exitCode).not.toBe(0);
     expect(r.stderr.toString()).toContain(
-      "CockroachDB appears to be running on port 26080 but its PID file is missing; stop it first.",
+      `CockroachDB is answering on port 26080, but not as the process recorded in ${pidFile()}; stop it first.`,
     );
     expect(existsSync(join(store, "CURRENT"))).toBe(true);
+  });
+
+  it("bounds the reset health check with a curl timeout", async () => {
+    linuxAmd64();
+    stub("curl", "exit 22");
+    plantFakeBinary("v26.3.1");
+    await run(env());
+    await $`kill ${readFileSync(pidFile(), "utf-8").trim()}`.nothrow().quiet();
+    rmSync(pidFile());
+    const store = join(home, ".crdb-data");
+    fakeStore(store);
+    stub("curl", 'echo "$@" >> "$HOME/curl.log"; exit 22');
+    const r = await reset();
+    expect(r.stdout.toString()).toContain("wiped");
+    const calls = readFileSync(join(home, "curl.log"), "utf-8")
+      .split("\n")
+      .filter((l) => l.endsWith(":26080/health"));
+    expect(calls.length).toBe(1);
+    expect(calls[0]).toContain("--max-time 2");
   });
 
   it("crdb-reset refuses a relative store path from the config", async () => {

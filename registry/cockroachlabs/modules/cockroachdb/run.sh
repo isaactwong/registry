@@ -316,8 +316,15 @@ if [[ -d "$STORE_REAL" && -n "$(find "$STORE_REAL" -mindepth 1 -maxdepth 1 ! -na
   HAS_MANIFEST="$(find "$STORE_REAL" -maxdepth 1 -name 'MANIFEST-*' -print -quit)"
   HAS_POINTER="$(find "$STORE_REAL" -maxdepth 1 \( -name CURRENT -o -name 'marker.manifest.*' \) -print -quit)"
   HAS_VERSION="$(find "$STORE_REAL" -maxdepth 1 \( -name COCKROACHDB_VERSION -o -name STORAGE_MIN_VERSION \) -print -quit)"
-  # A failed first start leaves only logs and temp directories.
-  HAS_OTHER="$(find "$STORE_REAL" -mindepth 1 -maxdepth 1 ! -name 'lost+found' ! -name logs ! -name 'cockroach-temp*' -print -quit)"
+  # A failed first start leaves only cockroach-temp*, temp-dirs-record.txt, and
+  # logs. A logs directory counts only with evidence it came from CockroachDB:
+  # logs/cockroach.log, or a temp entry beside it.
+  HAS_TEMP="$(find "$STORE_REAL" -mindepth 1 -maxdepth 1 \( -name 'cockroach-temp*' -o -name temp-dirs-record.txt \) -print -quit)"
+  if [[ -f "$STORE_REAL/logs/cockroach.log" || -n "$HAS_TEMP" ]]; then
+    HAS_OTHER="$(find "$STORE_REAL" -mindepth 1 -maxdepth 1 ! -name 'lost+found' ! -name logs ! -name 'cockroach-temp*' ! -name temp-dirs-record.txt -print -quit)"
+  else
+    HAS_OTHER="$(find "$STORE_REAL" -mindepth 1 -maxdepth 1 ! -name 'lost+found' ! -name 'cockroach-temp*' ! -name temp-dirs-record.txt -print -quit)"
+  fi
   if [[ ( -z "$HAS_MANIFEST" || -z "$HAS_POINTER" ) && -z "$HAS_VERSION" && -n "$HAS_OTHER" ]]; then
     refuse "the directory is not empty and does not look like a CockroachDB store (no MANIFEST-* file with CURRENT or marker.manifest.*). Use a dedicated directory for store_path."
   fi
@@ -351,7 +358,7 @@ if [[ -f "$PID_FILE" ]] && crdb_running "$(cat "$PID_FILE")"; then
 fi
 # Without a PID file we cannot stop the database, so never wipe a live one.
 if [[ "$STOPPED" -eq 0 ]] && curl -fsS --max-time 2 "http://localhost:$HTTP_PORT/health" > /dev/null 2>&1; then
-  echo "CockroachDB appears to be running on port $HTTP_PORT but its PID file is missing; stop it first." >&2
+  echo "CockroachDB is answering on port $HTTP_PORT, but not as the process recorded in $PID_FILE; stop it first." >&2
   exit 1
 fi
 rm -f "$PID_FILE"
