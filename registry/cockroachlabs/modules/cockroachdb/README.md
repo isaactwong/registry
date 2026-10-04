@@ -157,7 +157,7 @@ workload. A 2 CPU / 4 GB workspace is comfortable for typical dev-loop use.
 ## Platform support
 
 Linux `amd64` and `arm64` workspace agents with glibc (Alpine/musl images are
-not supported). The workspace image needs `curl`, plus `tar` and `sha256sum`
+not supported; a glibc image that also has musl installed is fine). The workspace image needs `curl`, plus `tar` and `sha256sum`
 unless `cockroach` is preinstalled. Other platforms fail at startup. For
 unsupported architectures the error points to
 [manual installation](https://www.cockroachlabs.com/docs/stable/install-cockroachdb).
@@ -179,8 +179,9 @@ restricted networks, set binary_url to an internal mirror or bake cockroach
 into the image.` See [Restricted networks](#restricted-networks).
 
 **Not ready in time.** The script fails with `CockroachDB not ready after Ns.`
-and prints the last log lines. The process was still running but its health
-check didn't pass within the timeout (60 seconds). Read
+and prints the last log lines. The process was still running but it hadn't
+written its PID file and passed the health check within the timeout (60
+seconds). Read
 `~/.local/share/cockroachdb/crdb.log`, then run `crdb-start` to try again. A
 slow or overloaded workspace is the usual cause.
 
@@ -200,7 +201,9 @@ binary.
 
 **musl or Alpine image.** The script fails with `This system uses musl libc
 (for example Alpine), and CockroachDB's Linux binaries need glibc.` Use a
-glibc-based image such as Debian, Ubuntu, or UBI.
+glibc-based image such as Debian, Ubuntu, or UBI. A glibc image that also has
+the `musl` package installed (for example `musl-tools`) is detected as glibc
+and works.
 
 **Disk full.** The script fails with `Could not create a temporary directory.
 Check free disk space in /tmp, then re-run.`, `Could not write the download of
@@ -216,11 +219,25 @@ start fresh (this deletes all data).
 **Shared-network warning.** The script log shows `WARNING: this workspace may
 share its host's network`. See [Host networking](#host-networking).
 
+**Helpers say the config is missing.** `crdb-start` or `crdb-reset` prints
+`CockroachDB module config not found at <path>. Restart the workspace to
+reinstall.` Restart the workspace so the module script runs again and rewrites
+the config and helpers.
+
 **Starting over.** `crdb-reset` stops the database and **deletes all data** in
 the store, then starts a fresh cluster. It refuses unsafe store paths:
 relative paths, paths with `.` or `..` segments, `$HOME` or any parent of it,
 `/`, and the module's own state directory. It also refuses a non-empty
-directory that doesn't look like a CockroachDB store.
+directory that doesn't look like a CockroachDB store. A top-level `lost+found`
+(present on a dedicated ext4 volume) is ignored and kept. `crdb-reset` also
+works after a failed first start, when the directory holds only `logs` or
+`cockroach-temp*` entries. A `store_path` that is a symlink is followed, and the
+link itself is kept.
+
+If a database answers on the console port but the PID file is missing,
+`crdb-reset` stops with `CockroachDB appears to be running on port <http_port>
+but its PID file is missing; stop it first.` Stop that process, then run
+`crdb-reset` again.
 
 ## Not covered by this module
 
