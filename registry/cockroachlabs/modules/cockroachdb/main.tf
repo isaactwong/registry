@@ -75,6 +75,22 @@ variable "subdomain" {
 }
 
 locals {
+  # The CockroachDB version this module release installs by default. Keep it
+  # equal to the crdb_version variable default (a variable default cannot
+  # reference a local, and a test checks they match). scripts/bump-crdb-version.sh
+  # updates both together with the hashes below.
+  default_crdb_version = "v26.3.1"
+
+  # Official SHA-256 digests of the default version's Linux tarballs, from
+  # https://binaries.cockroachdb.com/cockroach-<version>.linux-<arch>.tgz.sha256sum.
+  # run.sh checks the download against these, so a mirror cannot substitute a
+  # different file. Other versions fall back to the mirror's .sha256sum.
+  pinned_sha256 = {
+    amd64 = "92b4ca979efb45068eed6f8053b1b8fccc337efb3df7ade27338bf3a9b69f600"
+    arm64 = "91f78b0cf97604997a7a784cbe51da3bd956706cad23d39c235ec4f89c7af59a"
+  }
+  use_pinned = var.crdb_version == local.default_crdb_version
+
   # Values for the script prelude. Each is single-quoted for bash, with any
   # embedded single quote written as '\'' , so no value can break out.
   prelude = {
@@ -83,6 +99,9 @@ locals {
     SQL_PORT     = tostring(var.sql_port)
     HTTP_PORT    = tostring(var.http_port)
     BINARY_URL   = var.binary_url
+    # Empty unless crdb_version is the default version.
+    PINNED_SHA256_AMD64 = local.use_pinned ? local.pinned_sha256.amd64 : ""
+    PINNED_SHA256_ARM64 = local.use_pinned ? local.pinned_sha256.arm64 : ""
   }
   shq = { for k, v in local.prelude : k => "'${replace(v, "'", "'\\''")}'" }
 
@@ -153,6 +172,11 @@ resource "coder_script" "cockroachdb" {
     precondition {
       condition     = var.sql_port != var.http_port
       error_message = "sql_port and http_port must differ."
+    }
+
+    precondition {
+      condition     = alltrue([for h in values(local.pinned_sha256) : can(regex("^[0-9a-f]{64}$", h))])
+      error_message = "Each pinned SHA-256 in local.pinned_sha256 must be 64 lowercase hex characters."
     }
   }
 }

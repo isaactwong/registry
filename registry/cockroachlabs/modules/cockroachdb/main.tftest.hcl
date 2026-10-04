@@ -31,6 +31,55 @@ run "defaults" {
   }
 }
 
+run "default_version_is_pinned" {
+  command = plan
+
+  variables {
+    agent_id = "test-agent-id"
+  }
+
+  # The variable default must equal the default-version local, or nothing is
+  # pinned. These exports are non-empty only when they are equal.
+  assert {
+    condition     = var.crdb_version == local.default_crdb_version
+    error_message = "crdb_version default must equal local.default_crdb_version"
+  }
+
+  assert {
+    condition     = strcontains(coder_script.cockroachdb.script, "export PINNED_SHA256_AMD64='${local.pinned_sha256.amd64}'")
+    error_message = "script must export the pinned amd64 hash for the default version"
+  }
+
+  assert {
+    condition     = strcontains(coder_script.cockroachdb.script, "export PINNED_SHA256_ARM64='${local.pinned_sha256.arm64}'")
+    error_message = "script must export the pinned arm64 hash for the default version"
+  }
+
+  assert {
+    condition     = can(regex("^[0-9a-f]{64}$", local.pinned_sha256.amd64)) && can(regex("^[0-9a-f]{64}$", local.pinned_sha256.arm64))
+    error_message = "pinned hashes must be 64 lowercase hex characters"
+  }
+}
+
+run "other_version_is_not_pinned" {
+  command = plan
+
+  variables {
+    agent_id     = "test-agent-id"
+    crdb_version = "v26.2.0"
+  }
+
+  assert {
+    condition     = strcontains(coder_script.cockroachdb.script, "export PINNED_SHA256_AMD64=''")
+    error_message = "amd64 pin must be empty for a non-default version"
+  }
+
+  assert {
+    condition     = strcontains(coder_script.cockroachdb.script, "export PINNED_SHA256_ARM64=''")
+    error_message = "arm64 pin must be empty for a non-default version"
+  }
+}
+
 run "invalid_binary_url_rejected" {
   command = plan
 

@@ -320,6 +320,86 @@ describe("run.sh", () => {
     expect(r.stderr.toString()).toContain("Checksum verification failed");
   });
 
+  // A real sha256sum on the host, so pinned-hash tests compute real digests
+  // (other tests stub sha256sum).
+  const realSha256 = () => {
+    const p = Bun.which("sha256sum");
+    if (p) return `exec ${p} "$@"`;
+    return 'exec shasum -a 256 "$@"';
+  };
+
+  // Serves a small tarball with the real layout through a curl stub that logs
+  // its arguments. The mirror's .sha256sum matches the tarball. Returns the
+  // tarball's SHA-256.
+  const servePinnedFixture = async () => {
+    const prefix = "cockroach-v26.3.1.linux-amd64";
+    const src = join(home, "pinned-src");
+    mkdirSync(join(src, prefix), { recursive: true });
+    writeFileSync(join(src, prefix, "cockroach"), FAKE_COCKROACH, {
+      mode: 0o755,
+    });
+    const tgz = join(home, "pinned.tgz");
+    await $`tar -czf ${tgz} -C ${src} ${prefix}`.quiet();
+    const hash = new Bun.CryptoHasher("sha256")
+      .update(readFileSync(tgz))
+      .digest("hex");
+    writeFileSync(
+      join(home, "pinned.tgz.sha256sum"),
+      `${hash}  ${prefix}.tgz\n`,
+    );
+    stub(
+      "curl",
+      'echo "$@" >> "$HOME/curl.log"; case "$*" in *health*) exit 0;; esac; while [ $# -gt 0 ]; do case "$1" in -o) shift; case "$1" in *.sha256sum) cp "$HOME/pinned.tgz.sha256sum" "$1";; *) cp "$HOME/pinned.tgz" "$1";; esac;; esac; shift; done',
+    );
+    stub("sha256sum", realSha256());
+    return hash;
+  };
+
+  it("verifies against the pinned hash and never requests .sha256sum", async () => {
+    linuxAmd64();
+    const hash = await servePinnedFixture();
+    const r = await run(env({ PINNED_SHA256_AMD64: hash }));
+    expect(r.exitCode).toBe(0);
+    expect(
+      existsSync(join(home, ".local/share/cockroachdb/v26.3.1/cockroach")),
+    ).toBe(true);
+    const log = readFileSync(join(home, "curl.log"), "utf-8");
+    expect(log).toContain("cockroach-v26.3.1.linux-amd64.tgz");
+    expect(log).not.toContain(".sha256sum");
+  });
+
+  it("fails on a pinned-hash mismatch even if the mirror's .sha256sum matches", async () => {
+    linuxAmd64();
+    await servePinnedFixture();
+    const r = await run(env({ PINNED_SHA256_AMD64: "0".repeat(64) }));
+    expect(r.exitCode).not.toBe(0);
+    expect(r.stderr.toString()).toContain(
+      "Checksum mismatch for https://binaries.cockroachdb.com/cockroach-v26.3.1.linux-amd64.tgz: the file does not match the checksum pinned in this module. The mirror may be serving a modified or different file.",
+    );
+    expect(
+      existsSync(join(home, ".local/share/cockroachdb/v26.3.1/cockroach")),
+    ).toBe(false);
+    expect(existsSync(join(binDir, "cockroach"))).toBe(false);
+    expect(readFileSync(join(home, "curl.log"), "utf-8")).not.toContain(
+      ".sha256sum",
+    );
+  });
+
+  it("uses the arm64 pin on arm64", async () => {
+    stub("uname", 'if [ "$1" = "-s" ]; then echo Linux; else echo aarch64; fi');
+    await servePinnedFixture();
+    // The amd64 pin is wrong on purpose; only the arm64 pin applies.
+    const r = await run(
+      env({
+        PINNED_SHA256_AMD64: "0".repeat(64),
+        PINNED_SHA256_ARM64: "1".repeat(64),
+      }),
+    );
+    expect(r.exitCode).not.toBe(0);
+    expect(r.stderr.toString()).toContain("Checksum mismatch");
+    expect(r.stderr.toString()).toContain("linux-arm64.tgz");
+  });
+
   it("explains a missing .sha256sum on the mirror", async () => {
     linuxAmd64();
     stub(

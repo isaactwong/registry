@@ -7,6 +7,10 @@ set -euo pipefail
 : "${SQL_PORT:=26257}"
 : "${HTTP_PORT:=26080}"
 : "${BINARY_URL:=https://binaries.cockroachdb.com}"
+# Official SHA-256 of the module's default version, per arch. Empty for any
+# other version, which is then verified against the mirror's .sha256sum.
+: "${PINNED_SHA256_AMD64:=}"
+: "${PINNED_SHA256_ARM64:=}"
 : "${READY_TIMEOUT:=60}"
 : "${NET_SYS_DIR:=/sys/class/net}"
 : "${LIBC_PROBE_DIR:=/lib}"
@@ -113,14 +117,31 @@ else
       fi
       exit 1
     }
-    curl -fsSL -o "$WORK/$TARBALL.sha256sum" "$URL.sha256sum" || {
-      echo "Could not download $URL.sha256sum. A binary_url mirror must also serve the .sha256sum file next to the tarball." >&2
-      exit 1
-    }
-    (cd "$WORK" && sha256sum -c "$TARBALL.sha256sum") || {
-      echo "Checksum verification failed for $URL. The download may be corrupt, or the mirror may be out of date." >&2
-      exit 1
-    }
+    case "$ARCH" in
+      amd64) PINNED="$PINNED_SHA256_AMD64" ;;
+      *) PINNED="$PINNED_SHA256_ARM64" ;;
+    esac
+    if [[ -n "$PINNED" ]]; then
+      # The default version is checked against a hash pinned in the module, so
+      # a mirror cannot swap the tarball and its checksum together.
+      ACTUAL="$(sha256sum "$WORK/$TARBALL")" || {
+        echo "Could not compute the SHA-256 of $WORK/$TARBALL." >&2
+        exit 1
+      }
+      if [[ "${ACTUAL%% *}" != "$PINNED" ]]; then
+        echo "Checksum mismatch for $URL: the file does not match the checksum pinned in this module. The mirror may be serving a modified or different file." >&2
+        exit 1
+      fi
+    else
+      curl -fsSL -o "$WORK/$TARBALL.sha256sum" "$URL.sha256sum" || {
+        echo "Could not download $URL.sha256sum. A binary_url mirror must also serve the .sha256sum file next to the tarball." >&2
+        exit 1
+      }
+      (cd "$WORK" && sha256sum -c "$TARBALL.sha256sum") || {
+        echo "Checksum verification failed for $URL. The download may be corrupt, or the mirror may be out of date." >&2
+        exit 1
+      }
+    fi
 
     # Extract into the temp dir, then copy and rename within the final
     # directory so an interrupted run never leaves a partial install. The
