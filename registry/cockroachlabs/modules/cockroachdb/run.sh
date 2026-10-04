@@ -214,7 +214,11 @@ for _ in $(seq 1 "$TIMEOUT"); do
     echo "Full log: $LOG_FILE" >&2
     exit 1
   fi
-  if curl -fsS "http://localhost:$HTTP_PORT/health?ready=1" > /dev/null 2>&1; then
+  # CockroachDB writes --pid-file only after it starts listening. Requiring
+  # our child's PID there means a health answer comes from our process, not
+  # from another one holding the port.
+  if [[ -f "$PID_FILE" && "$(cat "$PID_FILE" 2> /dev/null || true)" == "$CHILD" ]] \
+    && curl -fsS --max-time 2 "http://localhost:$HTTP_PORT/health?ready=1" > /dev/null 2>&1; then
     echo "CockroachDB ready: SQL localhost:$SQL_PORT | Console http://localhost:$HTTP_PORT"
     exit 0
   fi

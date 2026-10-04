@@ -665,6 +665,41 @@ describe("run.sh", () => {
     expect(r.stderr.toString()).toContain("exited before becoming ready");
   });
 
+  it("does not report ready until our process writes its PID file", async () => {
+    linuxAmd64();
+    // Another process answers health, while our child stays alive but never
+    // gets as far as writing --pid-file.
+    stub("curl", 'case "$*" in *health*) exit 0;; esac; exit 22');
+    const dir = join(home, ".local/share/cockroachdb/v26.3.1");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "cockroach"),
+      '#!/bin/sh\n[ "$1" = version ] && exit 0\nwhile :; do sleep 1; done\n',
+      { mode: 0o755 },
+    );
+    const r = await run(env({ READY_TIMEOUT: "2" }));
+    expect(r.exitCode).not.toBe(0);
+    expect(r.stdout.toString()).not.toContain("CockroachDB ready");
+    expect(r.stderr.toString()).toContain("not ready after 2s");
+  });
+
+  it("bounds readiness and health checks with a curl timeout", async () => {
+    linuxAmd64();
+    stub(
+      "curl",
+      'echo "$@" >> "$HOME/curl.log"; case "$*" in *health*) exit 0;; esac; exit 22',
+    );
+    plantFakeBinary("v26.3.1");
+    const r = await run(env());
+    expect(r.exitCode).toBe(0);
+    const calls = readFileSync(join(home, "curl.log"), "utf-8")
+      .trim()
+      .split("\n")
+      .filter((l) => l.includes("health"));
+    expect(calls.length).toBeGreaterThan(0);
+    for (const c of calls) expect(c).toContain("--max-time 2");
+  });
+
   it("installs the spatial libraries next to the binary", async () => {
     linuxAmd64();
     await serveTarball(true);
