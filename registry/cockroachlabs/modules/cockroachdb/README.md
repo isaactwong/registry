@@ -125,8 +125,11 @@ module "cockroachdb" {
 }
 ```
 
-The mirror must serve `cockroach-<version>.linux-<arch>.tgz` and its
-`.sha256sum`. The tarball must contain
+The mirror must serve the official, unmodified `cockroach-<version>.linux-<arch>.tgz`.
+For the module's default version, the module checks the tarball against a
+SHA-256 hash pinned in the module itself, so a mirror cannot substitute a
+different file. For any other `crdb_version`, the mirror must also serve the
+`.sha256sum` file next to the tarball. The tarball must contain
 `cockroach-<version>.linux-<arch>/cockroach`. This is the same layout as
 `binaries.cockroachdb.com`.
 
@@ -136,7 +139,10 @@ The module makes these outbound requests, and only when the requested version
 isn't already installed and no `cockroach` is on `PATH`:
 
 - `GET <binary_url>/cockroach-<version>.linux-<arch>.tgz`
-- `GET <binary_url>/cockroach-<version>.linux-<arch>.tgz.sha256sum`
+- For versions other than the module's default only:
+  `GET <binary_url>/cockroach-<version>.linux-<arch>.tgz.sha256sum`. The
+  default version is verified against a hash pinned in the module, so only the
+  tarball is requested.
 
 Nothing else connects outbound at runtime. The module needs no `sudo` or root.
 
@@ -192,6 +198,13 @@ slow or overloaded workspace is the usual cause.
 <url>. The download may be corrupt, or the mirror may be out of date.` Re-run
 the script. If it persists, check that the mirror serves the right files for
 that version.
+
+**Pinned checksum mismatch.** The script fails with `Checksum mismatch for
+<url>: the file does not match the checksum pinned in this module. The mirror
+may be serving a modified or different file.` This happens only for the
+module's default version. The tarball at `binary_url` is not the official
+file. Point `binary_url` at a mirror of the unmodified tarball, or at
+`https://binaries.cockroachdb.com`.
 
 **Missing `.sha256sum`.** The script fails with `Could not download
 <url>.sha256sum. A binary_url mirror must also serve the .sha256sum file next
