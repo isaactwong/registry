@@ -249,9 +249,13 @@ STORE="${STORE_PATH%/}"
 [[ -n "$STORE" ]] || refuse "that is the filesystem root."
 
 # Check the path as written and, when it exists, its symlink-resolved form.
+# find does not follow a symlink given as its starting point, so every find
+# below uses the resolved path.
+STORE_REAL="$STORE"
 CANDIDATES=("$STORE")
 if [[ -d "$STORE" ]]; then
-  CANDIDATES+=("$(cd "$STORE" && pwd -P)")
+  STORE_REAL="$(cd "$STORE" && pwd -P)"
+  CANDIDATES+=("$STORE_REAL")
 fi
 HOME_DIRS=("${HOME%/}")
 STATE_DIRS=("${STATE_DIR%/}")
@@ -274,10 +278,14 @@ done
 if [[ -e "$STORE" && ! -d "$STORE" ]]; then
   refuse "it is not a directory."
 fi
-if [[ -d "$STORE" && -n "$(find "$STORE" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
-  HAS_MANIFEST="$(find "$STORE" -maxdepth 1 -name 'MANIFEST-*' -print -quit)"
-  HAS_POINTER="$(find "$STORE" -maxdepth 1 \( -name CURRENT -o -name 'marker.manifest.*' \) -print -quit)"
-  if [[ -z "$HAS_MANIFEST" || -z "$HAS_POINTER" ]]; then
+# A top-level lost+found (always present on a dedicated ext4 volume) is ignored.
+if [[ -d "$STORE_REAL" && -n "$(find "$STORE_REAL" -mindepth 1 -maxdepth 1 ! -name 'lost+found' -print -quit)" ]]; then
+  HAS_MANIFEST="$(find "$STORE_REAL" -maxdepth 1 -name 'MANIFEST-*' -print -quit)"
+  HAS_POINTER="$(find "$STORE_REAL" -maxdepth 1 \( -name CURRENT -o -name 'marker.manifest.*' \) -print -quit)"
+  HAS_VERSION="$(find "$STORE_REAL" -maxdepth 1 \( -name COCKROACHDB_VERSION -o -name STORAGE_MIN_VERSION \) -print -quit)"
+  # A failed first start leaves only logs and temp directories.
+  HAS_OTHER="$(find "$STORE_REAL" -mindepth 1 -maxdepth 1 ! -name 'lost+found' ! -name logs ! -name 'cockroach-temp*' -print -quit)"
+  if [[ ( -z "$HAS_MANIFEST" || -z "$HAS_POINTER" ) && -z "$HAS_VERSION" && -n "$HAS_OTHER" ]]; then
     refuse "the directory is not empty and does not look like a CockroachDB store (no MANIFEST-* file with CURRENT or marker.manifest.*). Use a dedicated directory for store_path."
   fi
 fi
@@ -293,7 +301,9 @@ crdb_running() {
   fi
   [[ "$cmd" == *start-single-node* ]]
 }
+STOPPED=0
 if [[ -f "$PID_FILE" ]] && crdb_running "$(cat "$PID_FILE")"; then
+  STOPPED=1
   PID="$(cat "$PID_FILE")"
   echo "Stopping CockroachDB (PID $PID)..."
   kill "$PID"
@@ -306,10 +316,15 @@ if [[ -f "$PID_FILE" ]] && crdb_running "$(cat "$PID_FILE")"; then
     exit 1
   fi
 fi
+# Without a PID file we cannot stop the database, so never wipe a live one.
+if [[ "$STOPPED" -eq 0 ]] && curl -fsS --max-time 2 "http://localhost:$HTTP_PORT/health" > /dev/null 2>&1; then
+  echo "CockroachDB appears to be running on port $HTTP_PORT but its PID file is missing; stop it first." >&2
+  exit 1
+fi
 rm -f "$PID_FILE"
-# Empty the directory but keep it, so a mount point still works.
-if [[ -d "$STORE" ]]; then
-  find "$STORE" -mindepth 1 -delete
+# Empty the directory but keep it (and lost+found), so a mount point still works.
+if [[ -d "$STORE_REAL" ]]; then
+  find "$STORE_REAL" -mindepth 1 -maxdepth 1 ! -name 'lost+found' -exec rm -rf {} +
 fi
 echo "Store at $STORE_PATH wiped. Starting a fresh cluster..."
 exec "$BIN_DIR/crdb-start"

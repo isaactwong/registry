@@ -2,10 +2,12 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { $ } from "bun";
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -492,6 +494,113 @@ describe("run.sh", () => {
     await run(env());
     const r = await reset();
     expect(r.stdout.toString()).toContain("wiped");
+  });
+
+  it("crdb-reset empties a store reached through a symlink", async () => {
+    linuxAmd64();
+    stub("curl", "exit 22");
+    plantFakeBinary("v26.3.1");
+    const target = join(home, "crdb-target");
+    const link = join(home, "crdb-link");
+    fakeStore(target);
+    symlinkSync(target, link);
+    await run(env({ STORE_PATH: link }));
+    const r = await reset();
+    expect(r.stdout.toString()).toContain("wiped");
+    expect(existsSync(join(target, "CURRENT"))).toBe(false);
+    expect(existsSync(join(target, "000002.log"))).toBe(false);
+    expect(lstatSync(link).isSymbolicLink()).toBe(true);
+    expect(existsSync(target)).toBe(true);
+  });
+
+  it("crdb-reset ignores and keeps lost+found", async () => {
+    linuxAmd64();
+    stub("curl", "exit 22");
+    plantFakeBinary("v26.3.1");
+    const store = join(home, "volume");
+    mkdirSync(join(store, "lost+found"), { recursive: true });
+    writeFileSync(join(store, "lost+found", "orphan"), "x");
+    // Only lost+found: counts as empty.
+    await run(env({ STORE_PATH: store }));
+    let r = await reset();
+    expect(r.stdout.toString()).toContain("wiped");
+    // lost+found plus a real store.
+    fakeStore(store);
+    r = await reset();
+    expect(r.stdout.toString()).toContain("wiped");
+    expect(existsSync(join(store, "CURRENT"))).toBe(false);
+    expect(existsSync(join(store, "lost+found", "orphan"))).toBe(true);
+  });
+
+  it("crdb-reset accepts the leftovers of a failed first start", async () => {
+    linuxAmd64();
+    stub("curl", "exit 22");
+    plantFakeBinary("v26.3.1");
+    const store = join(home, "failedstore");
+    mkdirSync(join(store, "logs"), { recursive: true });
+    writeFileSync(join(store, "logs", "cockroach.log"), "x");
+    mkdirSync(join(store, "cockroach-temp123"));
+    await run(env({ STORE_PATH: store }));
+    const r = await reset();
+    expect(r.stdout.toString()).toContain("wiped");
+    expect(existsSync(join(store, "logs"))).toBe(false);
+  });
+
+  it("crdb-reset accepts a store identified by its version file", async () => {
+    linuxAmd64();
+    stub("curl", "exit 22");
+    plantFakeBinary("v26.3.1");
+    const store = join(home, "versioned");
+    mkdirSync(store);
+    writeFileSync(join(store, "COCKROACHDB_VERSION"), "x");
+    writeFileSync(join(store, "other"), "x");
+    await run(env({ STORE_PATH: store }));
+    const r = await reset();
+    expect(r.stdout.toString()).toContain("wiped");
+    expect(existsSync(join(store, "other"))).toBe(false);
+  });
+
+  it("crdb-reset refuses to wipe a live database without a PID file", async () => {
+    linuxAmd64();
+    stub("curl", "exit 22");
+    plantFakeBinary("v26.3.1");
+    await run(env());
+    await $`kill ${readFileSync(pidFile(), "utf-8").trim()}`.nothrow().quiet();
+    rmSync(pidFile());
+    const store = join(home, ".crdb-data");
+    fakeStore(store);
+    stub("curl", 'case "$*" in *health*) exit 0;; esac; exit 22');
+    const r = await reset();
+    expect(r.exitCode).not.toBe(0);
+    expect(r.stderr.toString()).toContain(
+      "CockroachDB appears to be running on port 26080 but its PID file is missing; stop it first.",
+    );
+    expect(existsSync(join(store, "CURRENT"))).toBe(true);
+  });
+
+  it("crdb-reset refuses a relative store path from the config", async () => {
+    linuxAmd64();
+    stub("curl", "exit 22");
+    plantFakeBinary("v26.3.1");
+    await run(env());
+    writeFileSync(
+      configFile(),
+      readFileSync(configFile(), "utf-8").replace(
+        /^STORE_PATH=.*$/m,
+        "STORE_PATH=relstore",
+      ),
+    );
+    const cwd = join(home, "work");
+    mkdirSync(join(cwd, "relstore"), { recursive: true });
+    writeFileSync(join(cwd, "relstore", "precious"), "x");
+    const r = await $`${join(binDir, "crdb-reset")}`
+      .env(env())
+      .cwd(cwd)
+      .nothrow()
+      .quiet();
+    expect(r.exitCode).not.toBe(0);
+    expect(r.stderr.toString()).toContain("Refusing");
+    expect(existsSync(join(cwd, "relstore", "precious"))).toBe(true);
   });
 
   it("fails before downloading on a musl system", async () => {
