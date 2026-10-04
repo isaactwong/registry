@@ -9,7 +9,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import {
   runTerraformApply,
   runTerraformInit,
@@ -218,6 +218,8 @@ describe("run.sh", () => {
     plantFakeBinary("v26.3.1");
     await run(env());
     const store = join(home, ".crdb-data");
+    writeFileSync(join(store, "CURRENT"), "MANIFEST-000001\n");
+    writeFileSync(join(store, "MANIFEST-000001"), "x");
     writeFileSync(join(store, "marker"), "x");
     const firstPid = readFileSync(pidFile(), "utf-8").trim();
 
@@ -381,6 +383,222 @@ describe("run.sh", () => {
     expect(existsSync(join(home, ".local/share/cockroachdb", "v26.3.1"))).toBe(
       true,
     );
+  });
+
+  // Plants a directory that looks like a CockroachDB store.
+  const fakeStore = (dir: string, marker = false) => {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "MANIFEST-000001"), "x");
+    writeFileSync(
+      join(dir, marker ? "marker.manifest.000001.MANIFEST-000001" : "CURRENT"),
+      "x",
+    );
+    writeFileSync(join(dir, "000002.log"), "x");
+  };
+
+  const reset = () =>
+    $`${join(binDir, "crdb-reset")}`.env(env()).nothrow().quiet();
+
+  // Serves a tarball shaped like the real download via the curl stub.
+  const serveTarball = async (withLib: boolean) => {
+    const prefix = "cockroach-v26.3.1.linux-amd64";
+    const src = join(home, "tarball-src");
+    mkdirSync(join(src, prefix, "lib"), { recursive: true });
+    writeFileSync(join(src, prefix, "cockroach"), FAKE_COCKROACH, {
+      mode: 0o755,
+    });
+    if (withLib) writeFileSync(join(src, prefix, "lib", "libgeos.so"), "geos");
+    else rmSync(join(src, prefix, "lib"), { recursive: true });
+    await $`tar -czf ${join(home, "fixture.tgz")} -C ${src} ${prefix}`.quiet();
+    stub(
+      "curl",
+      'case "$*" in *health*) exit 0;; esac; while [ $# -gt 0 ]; do case "$1" in -o) shift; case "$1" in *.sha256sum) : > "$1";; *) cp "$HOME/fixture.tgz" "$1";; esac;; esac; shift; done',
+    );
+    stub("sha256sum", "exit 0");
+  };
+
+  it("crdb-reset refuses an ancestor of $HOME", async () => {
+    linuxAmd64();
+    stub("curl", "exit 22");
+    plantFakeBinary("v26.3.1");
+    await run(env({ STORE_PATH: dirname(home) }));
+    const r = await reset();
+    expect(r.exitCode).not.toBe(0);
+    expect(r.stderr.toString()).toContain("Refusing");
+    expect(existsSync(join(home, "stubs"))).toBe(true);
+  });
+
+  it("crdb-reset refuses a path with .. segments", async () => {
+    linuxAmd64();
+    stub("curl", "exit 22");
+    plantFakeBinary("v26.3.1");
+    const store = `${home}/a/../b`;
+    fakeStore(join(home, "b"));
+    await run(env({ STORE_PATH: store }));
+    const r = await reset();
+    expect(r.exitCode).not.toBe(0);
+    expect(r.stderr.toString()).toContain("Refusing");
+    expect(existsSync(join(home, "b", "CURRENT"))).toBe(true);
+  });
+
+  it("crdb-reset refuses a non-empty directory that is not a store", async () => {
+    linuxAmd64();
+    stub("curl", "exit 22");
+    plantFakeBinary("v26.3.1");
+    const store = join(home, "projects");
+    mkdirSync(store);
+    writeFileSync(join(store, "precious.txt"), "x");
+    await run(env({ STORE_PATH: store }));
+    const r = await reset();
+    expect(r.exitCode).not.toBe(0);
+    expect(r.stderr.toString()).toContain(
+      "does not look like a CockroachDB store",
+    );
+    expect(existsSync(join(store, "precious.txt"))).toBe(true);
+  });
+
+  it("crdb-reset keeps the store directory itself", async () => {
+    linuxAmd64();
+    stub("curl", "exit 22");
+    plantFakeBinary("v26.3.1");
+    const store = join(home, "mount point");
+    fakeStore(store);
+    await run(env({ STORE_PATH: store }));
+    const r = await reset();
+    expect(r.stdout.toString()).toContain("wiped");
+    expect(existsSync(store)).toBe(true);
+    expect(existsSync(join(store, "CURRENT"))).toBe(false);
+    expect(existsSync(join(store, "000002.log"))).toBe(false);
+  });
+
+  it("crdb-reset recognizes a store that uses marker files", async () => {
+    linuxAmd64();
+    stub("curl", "exit 22");
+    plantFakeBinary("v26.3.1");
+    const store = join(home, "newstore");
+    fakeStore(store, true);
+    await run(env({ STORE_PATH: store }));
+    const r = await reset();
+    expect(r.stdout.toString()).toContain("wiped");
+    expect(existsSync(join(store, "MANIFEST-000001"))).toBe(false);
+  });
+
+  it("crdb-reset wipes an empty store directory", async () => {
+    linuxAmd64();
+    stub("curl", "exit 22");
+    plantFakeBinary("v26.3.1");
+    await run(env());
+    const r = await reset();
+    expect(r.stdout.toString()).toContain("wiped");
+  });
+
+  it("fails before downloading on a musl system", async () => {
+    linuxAmd64();
+    stub("sha256sum", "exit 0");
+    stub("curl", 'echo "$@" >> "$HOME/curl.log"; exit 22');
+    const libc = join(home, "libc");
+    mkdirSync(libc);
+    writeFileSync(join(libc, "ld-musl-x86_64.so.1"), "");
+    const r = await run(env({ LIBC_PROBE_DIR: libc }));
+    expect(r.exitCode).not.toBe(0);
+    expect(r.stderr.toString()).toContain("glibc");
+    expect(existsSync(join(home, "curl.log"))).toBe(false);
+  });
+
+  it("reports a disk-full download write error", async () => {
+    linuxAmd64();
+    stub("sha256sum", "exit 0");
+    stub("curl", "exit 23");
+    const r = await run(env());
+    expect(r.exitCode).not.toBe(0);
+    expect(r.stderr.toString()).toContain("Could not write");
+    expect(r.stderr.toString()).toContain("free disk space");
+    expect(r.stderr.toString()).not.toContain("restricted networks");
+  });
+
+  it("reports a temp directory that cannot be created", async () => {
+    linuxAmd64();
+    stub("sha256sum", "exit 0");
+    stub("curl", "exit 22");
+    stub("mktemp", "exit 1");
+    const r = await run(env());
+    expect(r.exitCode).not.toBe(0);
+    expect(r.stderr.toString()).toContain("temporary directory");
+    expect(r.stderr.toString()).toContain("disk space");
+  });
+
+  it("requires curl even when cockroach is preinstalled", async () => {
+    linuxAmd64();
+    writeFileSync(join(stubs, "cockroach"), FAKE_COCKROACH, { mode: 0o755 });
+    // Stubs only: no /usr/bin, so no curl on PATH.
+    const r = await $`/bin/bash ${join(import.meta.dir, "run.sh")}`
+      .env(env({ PATH: stubs }))
+      .nothrow()
+      .quiet();
+    expect(r.exitCode).not.toBe(0);
+    expect(r.stderr.toString()).toContain("Missing required tool: curl");
+  });
+
+  it("does not report ready when our process has exited", async () => {
+    linuxAmd64();
+    // Health answers (as if another process held the port), but ours dies.
+    stub("curl", 'case "$*" in *health*) exit 0;; esac; exit 22');
+    const dir = join(home, ".local/share/cockroachdb/v26.3.1");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "cockroach"), "#!/bin/sh\nexit 1\n", {
+      mode: 0o755,
+    });
+    const r = await run(env({ READY_TIMEOUT: "5" }));
+    expect(r.exitCode).not.toBe(0);
+    expect(r.stdout.toString()).not.toContain("CockroachDB ready");
+    expect(r.stderr.toString()).toContain("exited before becoming ready");
+  });
+
+  it("installs the spatial libraries next to the binary", async () => {
+    linuxAmd64();
+    await serveTarball(true);
+    const r = await run(env());
+    expect(r.exitCode).toBe(0);
+    const ver = join(home, ".local/share/cockroachdb/v26.3.1");
+    expect(existsSync(join(ver, "cockroach"))).toBe(true);
+    expect(readFileSync(join(ver, "lib/libgeos.so"), "utf-8")).toBe("geos");
+  });
+
+  it("installs fine when the tarball has no lib directory", async () => {
+    linuxAmd64();
+    await serveTarball(false);
+    const r = await run(env());
+    expect(r.exitCode).toBe(0);
+    const ver = join(home, ".local/share/cockroachdb/v26.3.1");
+    expect(existsSync(join(ver, "cockroach"))).toBe(true);
+    expect(existsSync(join(ver, "lib"))).toBe(false);
+  });
+
+  it("removes other version directories after a download", async () => {
+    linuxAmd64();
+    await serveTarball(true);
+    const state = join(home, ".local/share/cockroachdb");
+    mkdirSync(join(state, "v26.2.0"), { recursive: true });
+    writeFileSync(join(state, "v26.2.0", "cockroach"), "old");
+    writeFileSync(join(state, "crdb.log"), "log\n");
+    const r = await run(env());
+    expect(r.exitCode).toBe(0);
+    expect(existsSync(join(state, "v26.2.0"))).toBe(false);
+    expect(existsSync(join(state, "v26.3.1/cockroach"))).toBe(true);
+    expect(existsSync(join(state, "crdb.log"))).toBe(true);
+    expect(existsSync(join(state, "config.env"))).toBe(true);
+    expect(existsSync(pidFile())).toBe(true);
+  });
+
+  it("keeps other versions when no download happens", async () => {
+    linuxAmd64();
+    stub("curl", "exit 22");
+    plantFakeBinary("v26.3.1");
+    plantFakeBinary("v26.2.0");
+    await run(env());
+    expect(
+      existsSync(join(home, ".local/share/cockroachdb/v26.2.0/cockroach")),
+    ).toBe(true);
   });
 
   it("fails fast when CockroachDB exits before becoming ready", async () => {
