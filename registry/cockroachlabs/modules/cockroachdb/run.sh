@@ -108,54 +108,72 @@ else
   ln -sf "$BINARY_PATH" "$BIN_DIR/cockroach"
 fi
 
+# --- Helper config --------------------------------------------------------
+# The helpers are static scripts that read their settings from this file, so
+# no value is ever spliced into script text. %q quotes each value for bash.
+CONFIG_FILE="$STATE_DIR/config.env"
+{
+  printf '%s=%q\n' PID_FILE "$PID_FILE"
+  printf '%s=%q\n' STORE_PATH "$STORE_PATH"
+  printf '%s=%q\n' STATE_DIR "$STATE_DIR"
+  printf '%s=%q\n' BINARY_PATH "$BINARY_PATH"
+  printf '%s=%q\n' LOG_FILE "$LOG_FILE"
+  printf '%s=%q\n' SQL_PORT "$SQL_PORT"
+  printf '%s=%q\n' HTTP_PORT "$HTTP_PORT"
+  printf '%s=%q\n' READY_TIMEOUT_DEFAULT "$READY_TIMEOUT"
+  printf '%s=%q\n' BIN_DIR "$BIN_DIR"
+} > "$CONFIG_FILE.tmp"
+mv -f "$CONFIG_FILE.tmp" "$CONFIG_FILE"
+
 # --- crdb-start helper ----------------------------------------------------
-cat > "$BIN_DIR/crdb-start" << EOF
+cat > "$BIN_DIR/crdb-start" << 'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-PID_FILE="$PID_FILE"
+# shellcheck source=/dev/null
+source "$HOME/.local/share/cockroachdb/config.env"
 # True only if the PID is alive and its command line is a CockroachDB server,
 # so a PID reused by an unrelated process is never mistaken for the database.
 crdb_running() {
   local cmd
-  kill -0 "\$1" 2> /dev/null || return 1
-  if [[ -r "/proc/\$1/cmdline" ]]; then
-    cmd="\$(tr '\\0' ' ' < "/proc/\$1/cmdline" 2> /dev/null || true)"
+  kill -0 "$1" 2> /dev/null || return 1
+  if [[ -r "/proc/$1/cmdline" ]]; then
+    cmd="$(tr '\0' ' ' < "/proc/$1/cmdline" 2> /dev/null || true)"
   else
-    cmd="\$(ps -p "\$1" -o args= 2> /dev/null || true)"
+    cmd="$(ps -p "$1" -o args= 2> /dev/null || true)"
   fi
-  [[ "\$cmd" == *start-single-node* ]]
+  [[ "$cmd" == *start-single-node* ]]
 }
-if [[ -f "\$PID_FILE" ]] && crdb_running "\$(cat "\$PID_FILE")"; then
-  echo "CockroachDB already running (PID \$(cat "\$PID_FILE"))."
+if [[ -f "$PID_FILE" ]] && crdb_running "$(cat "$PID_FILE")"; then
+  echo "CockroachDB already running (PID $(cat "$PID_FILE"))."
   exit 0
 fi
-rm -f "\$PID_FILE"
+rm -f "$PID_FILE"
 mkdir -p "$STORE_PATH"
 echo "Starting CockroachDB..."
 # No diagnostics reporting: workspaces may sit inside a no-egress perimeter.
-COCKROACH_SKIP_ENABLING_DIAGNOSTIC_REPORTING=true nohup "$BINARY_PATH" start-single-node \\
-  --insecure \\
-  --store="$STORE_PATH" \\
-  --listen-addr="localhost:$SQL_PORT" \\
-  --http-addr="localhost:$HTTP_PORT" \\
-  --pid-file="\$PID_FILE" \\
+COCKROACH_SKIP_ENABLING_DIAGNOSTIC_REPORTING=true nohup "$BINARY_PATH" start-single-node \
+  --insecure \
+  --store="$STORE_PATH" \
+  --listen-addr="localhost:$SQL_PORT" \
+  --http-addr="localhost:$HTTP_PORT" \
+  --pid-file="$PID_FILE" \
   >> "$LOG_FILE" 2>&1 &
-CHILD=\$!
-TIMEOUT="\${READY_TIMEOUT:-$READY_TIMEOUT}"
-for _ in \$(seq 1 "\$TIMEOUT"); do
-  if curl -fsS "http://localhost:$HTTP_PORT/health?ready=1" > /dev/null 2>&1; then
-    echo "CockroachDB ready: SQL localhost:$SQL_PORT | Console http://localhost:$HTTP_PORT"
-    exit 0
-  fi
-  if ! kill -0 "\$CHILD" 2> /dev/null; then
+CHILD=$!
+TIMEOUT="${READY_TIMEOUT:-$READY_TIMEOUT_DEFAULT}"
+for _ in $(seq 1 "$TIMEOUT"); do
+  if ! kill -0 "$CHILD" 2> /dev/null; then
     echo "CockroachDB exited before becoming ready. Last log lines:" >&2
     tail -n 20 "$LOG_FILE" >&2 || true
     echo "Full log: $LOG_FILE" >&2
     exit 1
   fi
+  if curl -fsS "http://localhost:$HTTP_PORT/health?ready=1" > /dev/null 2>&1; then
+    echo "CockroachDB ready: SQL localhost:$SQL_PORT | Console http://localhost:$HTTP_PORT"
+    exit 0
+  fi
   sleep 1
 done
-echo "CockroachDB not ready after \${TIMEOUT}s. Last log lines:" >&2
+echo "CockroachDB not ready after ${TIMEOUT}s. Last log lines:" >&2
 tail -n 20 "$LOG_FILE" >&2 || true
 echo "Full log: $LOG_FILE" >&2
 exit 1
@@ -163,50 +181,49 @@ EOF
 chmod +x "$BIN_DIR/crdb-start"
 
 # --- crdb-reset helper ----------------------------------------------------
-cat > "$BIN_DIR/crdb-reset" << EOF
+cat > "$BIN_DIR/crdb-reset" << 'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-PID_FILE="$PID_FILE"
-STORE_PATH="$STORE_PATH"
-STATE_DIR="\$HOME/.local/share/cockroachdb"
-case "\$STORE_PATH" in
-  "" | "/" | "\$HOME" | "\$HOME/" | "\$STATE_DIR" | "\$STATE_DIR"/*)
-    echo "Refusing to wipe store path '\$STORE_PATH'." >&2
+# shellcheck source=/dev/null
+source "$HOME/.local/share/cockroachdb/config.env"
+case "$STORE_PATH" in
+  "" | "/" | "$HOME" | "$HOME/" | "$STATE_DIR" | "$STATE_DIR"/*)
+    echo "Refusing to wipe store path '$STORE_PATH'." >&2
     exit 1
     ;;
   /*) ;;
   *)
-    echo "Refusing to wipe relative store path '\$STORE_PATH'." >&2
+    echo "Refusing to wipe relative store path '$STORE_PATH'." >&2
     exit 1
     ;;
 esac
 # True only if the PID is alive and its command line is a CockroachDB server.
 crdb_running() {
   local cmd
-  kill -0 "\$1" 2> /dev/null || return 1
-  if [[ -r "/proc/\$1/cmdline" ]]; then
-    cmd="\$(tr '\\0' ' ' < "/proc/\$1/cmdline" 2> /dev/null || true)"
+  kill -0 "$1" 2> /dev/null || return 1
+  if [[ -r "/proc/$1/cmdline" ]]; then
+    cmd="$(tr '\0' ' ' < "/proc/$1/cmdline" 2> /dev/null || true)"
   else
-    cmd="\$(ps -p "\$1" -o args= 2> /dev/null || true)"
+    cmd="$(ps -p "$1" -o args= 2> /dev/null || true)"
   fi
-  [[ "\$cmd" == *start-single-node* ]]
+  [[ "$cmd" == *start-single-node* ]]
 }
-if [[ -f "\$PID_FILE" ]] && crdb_running "\$(cat "\$PID_FILE")"; then
-  PID="\$(cat "\$PID_FILE")"
-  echo "Stopping CockroachDB (PID \$PID)..."
-  kill "\$PID"
-  for _ in \$(seq 1 30); do
-    kill -0 "\$PID" 2> /dev/null || break
+if [[ -f "$PID_FILE" ]] && crdb_running "$(cat "$PID_FILE")"; then
+  PID="$(cat "$PID_FILE")"
+  echo "Stopping CockroachDB (PID $PID)..."
+  kill "$PID"
+  for _ in $(seq 1 30); do
+    kill -0 "$PID" 2> /dev/null || break
     sleep 1
   done
-  if kill -0 "\$PID" 2> /dev/null; then
+  if kill -0 "$PID" 2> /dev/null; then
     echo "CockroachDB did not stop within 30s; aborting reset." >&2
     exit 1
   fi
 fi
-rm -f "\$PID_FILE"
-rm -rf -- "\$STORE_PATH"
-echo "Store at \$STORE_PATH wiped. Starting a fresh cluster..."
+rm -f "$PID_FILE"
+rm -rf -- "$STORE_PATH"
+echo "Store at $STORE_PATH wiped. Starting a fresh cluster..."
 exec "$BIN_DIR/crdb-start"
 EOF
 chmod +x "$BIN_DIR/crdb-reset"

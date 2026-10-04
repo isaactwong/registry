@@ -75,6 +75,17 @@ variable "subdomain" {
 }
 
 locals {
+  # Values for the script prelude. Each is single-quoted for bash, with any
+  # embedded single quote written as '\'' , so no value can break out.
+  prelude = {
+    CRDB_VERSION = var.crdb_version
+    STORE_PATH   = var.store_path
+    SQL_PORT     = tostring(var.sql_port)
+    HTTP_PORT    = tostring(var.http_port)
+    BINARY_URL   = var.binary_url
+  }
+  shq = { for k, v in local.prelude : k => "'${replace(v, "'", "'\\''")}'" }
+
   sql_url = "postgres://root@localhost:${var.sql_port}/defaultdb?sslmode=disable"
   env = {
     database_url = { name = "DATABASE_URL", value = local.sql_url }
@@ -124,15 +135,11 @@ resource "coder_script" "cockroachdb" {
   # Values are passed as env vars in a prelude, then run.sh is inlined verbatim.
   # templatefile() would require escaping every bash ${...} and would stop
   # ShellCheck from linting run.sh directly.
-  script = join("\n", [
-    "#!/usr/bin/env bash",
-    "export CRDB_VERSION=${jsonencode(var.crdb_version)}",
-    "export STORE_PATH=${jsonencode(var.store_path)}",
-    "export SQL_PORT=${jsonencode(tostring(var.sql_port))}",
-    "export HTTP_PORT=${jsonencode(tostring(var.http_port))}",
-    "export BINARY_URL=${jsonencode(var.binary_url)}",
-    file("${path.module}/run.sh"),
-  ])
+  script = join("\n", concat(
+    ["#!/usr/bin/env bash"],
+    [for k, v in local.prelude : "export ${k}=${local.shq[k]}"],
+    [file("${path.module}/run.sh")],
+  ))
 
   lifecycle {
     precondition {

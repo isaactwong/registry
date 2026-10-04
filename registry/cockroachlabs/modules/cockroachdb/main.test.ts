@@ -48,6 +48,7 @@ describe("run.sh", () => {
   let binDir: string;
 
   const pidFile = () => join(home, ".local/share/cockroachdb/crdb.pid");
+  const configFile = () => join(home, ".local/share/cockroachdb/config.env");
   const extraPids: number[] = [];
   const spawnUnrelated = () => {
     const p = Bun.spawn(["sleep", "3600"], {
@@ -100,7 +101,7 @@ describe("run.sh", () => {
   // Fake cockroach: records its env, honors --pid-file, then loops (no exec)
   // so its command line stays "/bin/sh .../cockroach start-single-node ...".
   const FAKE_COCKROACH =
-    '#!/bin/sh\n[ "$1" = version ] && { echo "Build Tag: v0.0.0-fake"; exit 0; }\nenv > "$HOME/cockroach.env"\nfor a in "$@"; do case "$a" in --pid-file=*) echo $$ > "${a#--pid-file=}";; esac; done\nwhile :; do sleep 1; done\n';
+    '#!/bin/sh\n[ "$1" = version ] && { echo "Build Tag: v0.0.0-fake"; exit 0; }\nenv > "$HOME/cockroach.env"\nprintf "%s\\n" "$@" > "$HOME/cockroach.args"\nfor a in "$@"; do case "$a" in --pid-file=*) echo $$ > "${a#--pid-file=}";; esac; done\nwhile :; do sleep 1; done\n';
 
   const plantFakeBinary = (version: string) => {
     const dir = join(home, ".local/share/cockroachdb", version);
@@ -129,6 +130,35 @@ describe("run.sh", () => {
       .cwd(cwd ?? process.cwd())
       .nothrow()
       .quiet();
+
+  it("runs the composed coder_script with a store path needing quoting", async () => {
+    linuxAmd64();
+    stub("curl", 'case "$*" in *health*) exit 0;; esac; exit 22');
+    plantFakeBinary("v26.3.1");
+    const store = join(home, "my data", "$x");
+    const state = await runTerraformApply(import.meta.dir, {
+      agent_id: "foo",
+      sql_port: 26300,
+      store_path: store,
+    });
+    const script = state.resources
+      .filter((r) => r.type === "coder_script")
+      .flatMap((r) => r.instances)[0].attributes.script as string;
+    const scriptFile = join(home, "composed.sh");
+    writeFileSync(scriptFile, script);
+    // The prelude must supply these; do not pre-set them.
+    const e: Record<string, string> = env();
+    for (const k of ["CRDB_VERSION", "STORE_PATH", "SQL_PORT", "HTTP_PORT"]) {
+      delete e[k];
+    }
+    const r = await $`bash ${scriptFile}`.env(e).nothrow().quiet();
+    expect(r.exitCode).toBe(0);
+    const args = readFileSync(join(home, "cockroach.args"), "utf-8")
+      .trim()
+      .split("\n");
+    expect(args).toContain(`--store=${store}`);
+    expect(args).toContain("--listen-addr=localhost:26300");
+  });
 
   it("rejects unsupported OS", async () => {
     stub("uname", 'if [ "$1" = "-s" ]; then echo Darwin; else echo x86_64; fi');
@@ -166,7 +196,7 @@ describe("run.sh", () => {
     stub("curl", "exit 22");
     plantFakeBinary("v26.3.1");
     await run(env());
-    expect(readFileSync(join(binDir, "crdb-reset"), "utf-8")).toContain(
+    expect(readFileSync(configFile(), "utf-8")).toContain(
       join(home, ".crdb-data"),
     );
   });
@@ -244,7 +274,7 @@ describe("run.sh", () => {
     await run(env());
     expect(existsSync(join(home, "downloaded"))).toBe(false);
     expect(existsSync(join(binDir, "cockroach"))).toBe(false);
-    expect(readFileSync(join(binDir, "crdb-start"), "utf-8")).toContain(
+    expect(readFileSync(configFile(), "utf-8")).toContain(
       join(stubs, "cockroach"),
     );
   });
