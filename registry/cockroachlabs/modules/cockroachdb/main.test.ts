@@ -34,6 +34,8 @@ describe("cockroachdb terraform", async () => {
     );
     expect(env).toEqual({
       DATABASE_URL: "postgres://root@localhost:26300/defaultdb?sslmode=disable",
+      COCKROACH_URL:
+        "postgres://root@localhost:26300/defaultdb?sslmode=disable",
       PGHOST: "localhost",
       PGPORT: "26300",
       PGUSER: "root",

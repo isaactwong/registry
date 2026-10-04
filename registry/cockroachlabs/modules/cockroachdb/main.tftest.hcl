@@ -137,6 +137,11 @@ run "resources_configured" {
     condition     = coder_env.database_url.value == "postgres://root@localhost:26257/defaultdb?sslmode=disable"
     error_message = "DATABASE_URL incorrect"
   }
+
+  assert {
+    condition     = coder_env.cockroach_url.name == "COCKROACH_URL" && coder_env.cockroach_url.value == coder_env.database_url.value
+    error_message = "COCKROACH_URL must equal DATABASE_URL"
+  }
 }
 
 run "outputs_reflect_inputs" {

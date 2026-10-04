@@ -89,10 +89,12 @@ locals {
   sql_url = "postgres://root@localhost:${var.sql_port}/defaultdb?sslmode=disable"
   env = {
     database_url = { name = "DATABASE_URL", value = local.sql_url }
-    pghost       = { name = "PGHOST", value = "localhost" }
-    pgport       = { name = "PGPORT", value = tostring(var.sql_port) }
-    pguser       = { name = "PGUSER", value = "root" }
-    pgdatabase   = { name = "PGDATABASE", value = "defaultdb" }
+    # Read by `cockroach sql` and friends, so they work with no flags.
+    cockroach_url = { name = "COCKROACH_URL", value = local.sql_url }
+    pghost        = { name = "PGHOST", value = "localhost" }
+    pgport        = { name = "PGPORT", value = tostring(var.sql_port) }
+    pguser        = { name = "PGUSER", value = "root" }
+    pgdatabase    = { name = "PGDATABASE", value = "defaultdb" }
   }
 }
 
@@ -100,6 +102,12 @@ resource "coder_env" "database_url" {
   agent_id = var.agent_id
   name     = local.env.database_url.name
   value    = local.env.database_url.value
+}
+
+resource "coder_env" "cockroach_url" {
+  agent_id = var.agent_id
+  name     = local.env.cockroach_url.name
+  value    = local.env.cockroach_url.value
 }
 
 resource "coder_env" "pghost" {
@@ -177,5 +185,5 @@ output "http_url" {
 
 output "version" {
   value       = var.crdb_version
-  description = "CockroachDB version installed by this module."
+  description = "The CockroachDB version this module installs when it downloads. A cockroach already on the workspace PATH takes precedence and is used instead."
 }
