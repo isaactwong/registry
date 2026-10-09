@@ -53,7 +53,7 @@ esac
 
 # curl is needed for the readiness check even when cockroach is preinstalled.
 command -v curl > /dev/null || {
-  echo "Missing required tool: curl" >&2
+  echo "Missing required tool: curl. Install it in the workspace image (for example: apt-get install -y curl)." >&2
   exit 1
 }
 
@@ -204,7 +204,10 @@ else
   if [[ ! -x "$BINARY_PATH" ]]; then
     for tool in tar sha256sum; do
       command -v "$tool" > /dev/null || {
-        echo "Missing required tool: $tool" >&2
+        # sha256sum ships in the coreutils package.
+        pkg="$tool"
+        [[ "$tool" != sha256sum ]] || pkg=coreutils
+        echo "Missing required tool: $tool. Install it in the workspace image (for example: apt-get install -y $pkg), or bake cockroach into the image." >&2
         exit 1
       }
     done
@@ -238,6 +241,8 @@ else
       rc=$?
       if [[ "$rc" -eq 23 ]]; then
         echo "Could not write the download of $URL to $WORK. Check free disk space, then re-run." >&2
+      elif [[ "$rc" -eq 22 ]]; then
+        echo "Could not download $URL. The server returned an HTTP error, so this version may not exist at binary_url. Check crdb_version and the mirror." >&2
       else
         echo "Could not download $URL. On restricted networks, set binary_url to an internal mirror or bake cockroach into the image." >&2
       fi
@@ -375,6 +380,9 @@ while ((SECONDS < TIMEOUT)); do
   if ! kill -0 "$CHILD" 2> /dev/null; then
     echo "CockroachDB exited before becoming ready. Last log lines:" >&2
     tail -n 20 "$LOG_FILE" >&2 || true
+    if tail -n 20 "$LOG_FILE" 2> /dev/null | grep -qi 'address already in use'; then
+      echo "Another process is using port $SQL_PORT or $HTTP_PORT. Set sql_port / http_port in the module block." >&2
+    fi
     echo "Full log: $LOG_FILE" >&2
     exit 1
   fi

@@ -215,12 +215,18 @@ points at `install.log`. Fix the error reported there, then restart the
 workspace.
 
 **Port already in use.** The script fails with `CockroachDB exited before
-becoming ready.` and the log typically shows `address already in use`. Set `sql_port` and
-`http_port` in the module block (defaults 26257 and 26080).
+becoming ready.`, the log typically shows `address already in use`, and the
+script adds `Another process is using port <sql_port> or <http_port>. Set
+sql_port / http_port in the module block.` Set `sql_port` and `http_port` in
+the module block (defaults 26257 and 26080).
 
-**Download blocked.** The script fails with `Could not download <url>. On
-restricted networks, set binary_url to an internal mirror or bake cockroach
-into the image.` See [Restricted networks](#restricted-networks).
+**Download failed.** If the server answers with an HTTP error, the script
+fails with `Could not download <url>. The server returned an HTTP error, so
+this version may not exist at binary_url. Check crdb_version and the mirror.`
+Check that `crdb_version` exists and that the mirror serves it. For any other
+failure, such as a blocked network, the script fails with `Could not download
+<url>. On restricted networks, set binary_url to an internal mirror or bake
+cockroach into the image.` See [Restricted networks](#restricted-networks).
 
 **Not ready in time.** The script fails with `CockroachDB not ready after Ns.`
 and prints the last log lines. The process was still running but it hadn't
@@ -245,10 +251,12 @@ file. Point `binary_url` at a mirror of the unmodified tarball, or at
 <url>.sha256sum. A binary_url mirror must also serve the .sha256sum file next
 to the tarball.` Add the checksum file to the mirror.
 
-**Missing tool.** The script fails with `Missing required tool: curl` (or
-`tar`, or `sha256sum`). Install it in the workspace image. `curl` is always
-required. `tar` and `sha256sum` are needed only when the module downloads the
-binary.
+**Missing tool.** The script fails with `Missing required tool: tar. Install it
+in the workspace image (for example: apt-get install -y tar), or bake cockroach
+into the image.` The same message appears for `sha256sum` (package `coreutils`).
+For `curl` it reads `Missing required tool: curl. Install it in the workspace
+image (for example: apt-get install -y curl).` `curl` is always required. `tar`
+and `sha256sum` are needed only when the module downloads the binary.
 
 **musl or Alpine image.** The script fails with `This system uses musl libc
 (for example Alpine), and CockroachDB's Linux binaries need glibc.` Use a

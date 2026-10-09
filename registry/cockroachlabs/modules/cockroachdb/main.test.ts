@@ -1164,6 +1164,69 @@ describe("module scripts", () => {
     expect(r.out).toContain("disk space");
   });
 
+  // A PATH of every system tool except the named ones.
+  const toolsWithout = (...omit: string[]) => {
+    const tools = join(home, "tools");
+    mkdirSync(tools);
+    for (const dir of ["/usr/bin", "/bin"]) {
+      for (const name of readdirSync(dir)) {
+        if (omit.includes(name) || existsSync(join(tools, name))) continue;
+        symlinkSync(join(dir, name), join(tools, name));
+      }
+    }
+    return tools;
+  };
+
+  it.each([
+    ["tar", "tar"],
+    ["sha256sum", "coreutils"],
+  ])("says how to fix a missing %s", async (tool, pkg) => {
+    linuxAmd64();
+    stub("curl", "exit 22");
+    if (tool === "tar") stub("sha256sum", "exit 0");
+    const r = await run(env({ PATH: `${stubs}:${toolsWithout(tool)}` }));
+    expect(r.installCode).not.toBe(0);
+    expect(r.out).toContain(
+      `Missing required tool: ${tool}. Install it in the workspace image (for example: apt-get install -y ${pkg}), or bake cockroach into the image.`,
+    );
+  });
+
+  it("says how to fix a missing curl", async () => {
+    linuxAmd64();
+    const r = await run(env({ PATH: `${stubs}:${toolsWithout("curl")}` }));
+    expect(r.installCode).not.toBe(0);
+    expect(r.out).toContain(
+      "Missing required tool: curl. Install it in the workspace image (for example: apt-get install -y curl).",
+    );
+  });
+
+  it("points at crdb_version and binary_url on a download HTTP error", async () => {
+    linuxAmd64();
+    stub("sha256sum", "exit 0");
+    stub("curl", "exit 22");
+    const r = await run();
+    expect(r.installCode).not.toBe(0);
+    expect(r.out).toContain(
+      "Could not download https://binaries.cockroachdb.com/cockroach-",
+    );
+    expect(r.out).toContain(
+      "The server returned an HTTP error, so this version may not exist at binary_url. Check crdb_version and the mirror.",
+    );
+    expect(r.out).not.toContain("restricted networks");
+  });
+
+  it("keeps the network advice for other download failures", async () => {
+    linuxAmd64();
+    stub("sha256sum", "exit 0");
+    stub("curl", "exit 6");
+    const r = await run();
+    expect(r.installCode).not.toBe(0);
+    expect(r.out).toContain(
+      "On restricted networks, set binary_url to an internal mirror or bake cockroach into the image.",
+    );
+    expect(r.out).not.toContain("HTTP error");
+  });
+
   it("requires curl even when cockroach is preinstalled", async () => {
     linuxAmd64();
     writeFileSync(join(stubs, "cockroach"), FAKE_COCKROACH, { mode: 0o755 });
@@ -1357,6 +1420,22 @@ describe("module scripts", () => {
     expect(Date.now() - t0).toBeLessThan(10000);
     expect(r.exitCode).not.toBe(0);
     expect(r.out).toContain("address already in use");
+    expect(r.out).toContain(
+      "Another process is using port 26257 or 26080. Set sql_port / http_port in the module block.",
+    );
+  });
+
+  it("does not blame the port when CockroachDB exits for another reason", async () => {
+    linuxAmd64();
+    stub("curl", "exit 22");
+    plantFakeBinary(
+      DEFAULT_VERSION,
+      '#!/bin/sh\n[ "$1" = version ] && exit 0\necho "ERROR: boom" >&2\nexit 1\n',
+    );
+    const r = await run(env({ READY_TIMEOUT: "30" }));
+    expect(r.exitCode).not.toBe(0);
+    expect(r.out).toContain("exited before becoming ready");
+    expect(r.out).not.toContain("Another process is using port");
   });
 
   it("leaves no partial binary when extraction fails", async () => {
