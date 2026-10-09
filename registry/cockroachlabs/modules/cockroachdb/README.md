@@ -33,15 +33,33 @@ module "cockroachdb" {
 - `crdb-start` restarts the database if it was stopped.
 - `crdb-reset` stops the database, wipes the store, and starts a fresh cluster.
 
-The helper commands live in Coder's script bin directory. If they're missing
-on a long-lived VM, restart the workspace.
+The helper commands are linked into Coder's script bin directory. If they're
+missing on a long-lived VM, restart the workspace.
+
+> [!NOTE]
+> The module needs Coder v2.30 or later, because it orders its install and
+> start scripts with `coder exp sync` (through the `coder-utils` module).
 
 The database runs in insecure mode. The SQL port listens on `localhost` only,
 so it is not reachable from outside the workspace (see [Host networking](#host-networking)).
 
-The DB Console is different. Coder proxies it through a `coder_app`, and in
-this insecure dev mode it has no login. The module therefore always limits the
-console to the workspace owner (and Coder site admins).
+> [!WARNING]
+> The DB Console has no login in this insecure dev mode. Coder proxies it
+> through a `coder_app`, and the module always limits it to the workspace
+> owner (and Coder site admins).
+
+## Files in the workspace
+
+Everything the module writes lives under
+`$HOME/.coder-modules/cockroachlabs/cockroachdb/`:
+
+- `scripts/` holds the install and start scripts, plus `crdb-start`,
+  `crdb-reset`, and the `crdb-common.sh` they share.
+- `logs/` holds `install.log` and `start.log` from the module scripts, and
+  `cockroach.log`, the database's own output.
+- `bin/<version>/` holds a downloaded `cockroach` and its `lib/` directory.
+- `state/` holds `config.env` (the helpers' settings) and `crdb.pid`.
+- `data/` is the default store.
 
 ## Examples
 
@@ -76,13 +94,16 @@ validation. -->
 
 ## Persistence
 
-Data lives at `$HOME/.crdb-data` by default and survives workspace stop/start
-**only if the home directory is on a persistent volume**. Coder's standard
-Docker and Kubernetes templates do this. Set `store_path` to point elsewhere.
+Data lives at `$HOME/.coder-modules/cockroachlabs/cockroachdb/data` by
+default and survives workspace stop/start **only if the home directory is on a
+persistent volume**. Coder's standard Docker and Kubernetes templates do this.
+Set `store_path` to point elsewhere.
 
 `store_path` must be an absolute path (no `~`) to a **dedicated directory used
 only for CockroachDB**. `crdb-reset` deletes the directory's contents, and it
 refuses any non-empty directory that doesn't look like a CockroachDB store.
+The module refuses to start with a store at `/`, at `$HOME` or any parent of
+it, or inside its own directory other than under `data/`.
 
 ## Coming from Postgres
 
@@ -149,14 +170,19 @@ Nothing else connects outbound at runtime. The module needs no `sudo` or root.
 ## Host networking
 
 CockroachDB runs without a password and listens on `localhost`. That's private
-in normal Docker, Kubernetes, and VM workspaces. If your template uses host
-networking (`network_mode = "host"` or `hostNetwork: true`) on a machine shared
-by several developers, `localhost` is shared too, and other users may reach
-each other's databases. Ports will also collide. Don't use this module with
-host-networked templates on shared machines. The module prints a warning in the
-script log when it sees signs of this. The same warning can be a false
-positive in a VM workspace that runs Docker, and it can also appear in
-Docker-in-Docker workspaces (envbox, sysbox), where `localhost` is private.
+in normal Docker, Kubernetes, and VM workspaces.
+
+> [!WARNING]
+> If your template uses host networking (`network_mode = "host"` or
+> `hostNetwork: true`) on a machine shared by several developers, `localhost`
+> is shared too, and other users may reach each other's databases. Ports will
+> also collide. Don't use this module with host-networked templates on shared
+> machines.
+
+The module prints a warning in the install log when it sees signs of this. The
+same warning can be a false positive in a VM workspace that runs Docker, and it
+can also appear in Docker-in-Docker workspaces (envbox, sysbox), where
+`localhost` is private.
 
 ## Resource sizing
 
@@ -173,11 +199,18 @@ unsupported architectures the error points to
 
 ## Troubleshooting
 
-**Where to look.** The startup script runs in the background and doesn't block
+**Where to look.** The module's scripts run in the background and don't block
 login, so the database may take a few seconds to come up after you log in. The
-script's output is in the Coder dashboard (the CockroachDB script log). The
-database log is `~/.local/share/cockroachdb/crdb.log`. Run `crdb-start` to
-start it again.
+`CockroachDB: Install Script` and `CockroachDB: Start Script` logs are in the
+Coder dashboard and in
+`~/.coder-modules/cockroachlabs/cockroachdb/logs/install.log` and `start.log`.
+The database log is `~/.coder-modules/cockroachlabs/cockroachdb/logs/cockroach.log`.
+Run `crdb-start` to start it again.
+
+**Install failed, so nothing started.** The start script fails with
+`CockroachDB was not started because the install script did not finish.` and
+points at `install.log`. Fix the error reported there, then restart the
+workspace.
 
 **Port already in use.** The script fails with `CockroachDB exited before
 becoming ready.` and the log typically shows `address already in use`. Set `sql_port` and
@@ -190,9 +223,9 @@ into the image.` See [Restricted networks](#restricted-networks).
 **Not ready in time.** The script fails with `CockroachDB not ready after Ns.`
 and prints the last log lines. The process was still running but it hadn't
 written its PID file and passed the health check within the timeout (60
-seconds). Read
-`~/.local/share/cockroachdb/crdb.log`, then run `crdb-start` to try again. A
-slow or overloaded workspace is the usual cause.
+seconds). `N` is the time actually waited. Read
+`~/.coder-modules/cockroachlabs/cockroachdb/logs/cockroach.log`, then run
+`crdb-start` to try again. A slow or overloaded workspace is the usual cause.
 
 **Checksum failure.** The script fails with `Checksum verification failed for
 <url>. The download may be corrupt, or the mirror may be out of date.` Re-run
@@ -232,18 +265,24 @@ can't open a store created by a newer one, and CockroachDB upgrades one major
 version at a time. Go back to the previous version, or run `crdb-reset` to
 start fresh (this deletes all data).
 
-**Shared-network warning.** The script log shows `WARNING: this workspace may
+**Shared-network warning.** The install log shows `WARNING: this workspace may
 share its host's network`. See [Host networking](#host-networking).
 
 **Helpers say the config is missing.** `crdb-start` or `crdb-reset` prints
 `CockroachDB module config not found at <path>. Restart the workspace to
-reinstall.` Restart the workspace so the module script runs again and rewrites
-the config and helpers.
+reinstall.` Restart the workspace so the install script runs again and
+rewrites the config and helpers.
+
+**Unsafe store path.** The install script or `crdb-start` fails with
+`Refusing to use '<path>' as the CockroachDB store:` and a reason. The store
+must not be `/`, `$HOME` or a parent of it, or a path inside
+`~/.coder-modules/cockroachlabs/cockroachdb` other than under `data/`. Set
+`store_path` to a dedicated directory.
 
 **Starting over.** `crdb-reset` stops the database and **deletes all data** in
 the store, then starts a fresh cluster. It refuses unsafe store paths:
 relative paths, paths with `.` or `..` segments, `$HOME` or any parent of it,
-`/`, and the module's own state directory. It also refuses a non-empty
+`/`, and the module's own directory other than under `data/`. It also refuses a non-empty
 directory that doesn't look like a CockroachDB store. A top-level `lost+found`
 (present on a dedicated ext4 volume) is ignored and kept. `crdb-reset` also
 works after a failed first start, when the directory holds only
