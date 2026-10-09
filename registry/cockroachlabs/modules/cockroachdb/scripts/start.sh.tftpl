@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ARG_MODULE_DIR_NAME='${ARG_MODULE_DIR_NAME}'
+MODULE_DIR="$HOME/$ARG_MODULE_DIR_NAME"
+
+# coder-utils runs this script once the install script exits, even if it
+# failed. The install script writes the marker only on success.
+if [[ ! -f "$MODULE_DIR/state/installed" ]]; then
+  echo "CockroachDB was not started because the install script did not finish. See $MODULE_DIR/logs/install.log." >&2
+  exit 1
+fi
+exec "$MODULE_DIR/scripts/crdb-start"

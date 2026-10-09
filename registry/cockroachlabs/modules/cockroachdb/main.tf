@@ -2,20 +2,21 @@ terraform {
   required_version = ">= 1.0"
   required_providers {
     coder = {
-      source  = "coder/coder"
-      version = ">= 2.0"
+      source = "coder/coder"
+      # coder-utils requires >= 2.13.
+      version = ">= 2.13"
     }
   }
 }
 
 variable "agent_id" {
-  type        = string
   description = "The ID of a Coder agent to attach this module to."
+  type        = string
 }
 
 variable "crdb_version" {
-  type        = string
   description = "CockroachDB version to install, e.g. v26.3.1. Defaults to the version pinned in this module release."
+  type        = string
   default     = "v26.3.1"
 
   validation {
@@ -25,19 +26,19 @@ variable "crdb_version" {
 }
 
 variable "store_path" {
+  description = "Absolute path of a directory dedicated to CockroachDB, inside the workspace. Empty resolves to $HOME/.coder-modules/cockroachlabs/cockroachdb/data. Must be on a persistent volume for data to survive workspace restarts. crdb-reset deletes its contents."
   type        = string
-  description = "Absolute path of a directory dedicated to CockroachDB, inside the workspace. Empty resolves to $HOME/.crdb-data. Must be on a persistent volume for data to survive workspace restarts. crdb-reset deletes its contents."
   default     = ""
 
   validation {
-    condition     = can(regex("^(/[^~]*)?$", var.store_path))
-    error_message = "store_path must be empty or an absolute path (starting with /) that does not contain ~."
+    condition     = can(regex("^(/[^~]*)?$", var.store_path)) && !can(regex("^/+$", var.store_path))
+    error_message = "store_path must be empty or an absolute path (starting with /) that does not contain ~ and is not /."
   }
 }
 
 variable "sql_port" {
-  type        = number
   description = "SQL listen port."
+  type        = number
   default     = 26257
 
   validation {
@@ -47,8 +48,8 @@ variable "sql_port" {
 }
 
 variable "http_port" {
-  type        = number
   description = "DB Console listen port."
+  type        = number
   default     = 26080
 
   validation {
@@ -58,8 +59,8 @@ variable "http_port" {
 }
 
 variable "binary_url" {
-  type        = string
   description = "Base URL for downloading the cockroach binary. Point at an internal mirror for restricted networks. Ignored when the image already has cockroach on PATH."
+  type        = string
   default     = "https://binaries.cockroachdb.com"
 
   validation {
@@ -69,41 +70,51 @@ variable "binary_url" {
 }
 
 variable "subdomain" {
-  type        = bool
   description = "Serve the DB Console on a Coder subdomain. Requires a wildcard access URL on the Coder deployment."
+  type        = bool
   default     = true
 }
 
+variable "order" {
+  description = "The order determines the position of app in the UI presentation. The lowest order is shown first and apps with equal order are sorted by name (ascending order)."
+  type        = number
+  default     = null
+}
+
 locals {
-  # The CockroachDB version this module release installs by default. Keep it
-  # equal to the crdb_version variable default (a variable default cannot
-  # reference a local, and a test checks they match). scripts/bump-crdb-version.sh
-  # updates both together with the hashes below.
+  module_dir_name = ".coder-modules/cockroachlabs/cockroachdb"
+  icon            = "/icon/cockroachdb.svg"
+
+  # A variable default cannot reference a local, so this must be kept equal to
+  # the crdb_version default by hand; a test checks they match. Bumping the
+  # default version is manual: change this local, the variable default, and
+  # both hashes below, taken from the official .sha256sum files.
   default_crdb_version = "v26.3.1"
 
   # Official SHA-256 digests of the default version's Linux tarballs, from
   # https://binaries.cockroachdb.com/cockroach-<version>.linux-<arch>.tgz.sha256sum.
-  # run.sh checks the download against these, so a mirror cannot substitute a
-  # different file. Other versions fall back to the mirror's .sha256sum.
+  # The install script checks the download against these, so a mirror cannot
+  # substitute a different file. Other versions fall back to the mirror's
+  # .sha256sum.
   pinned_sha256 = {
     amd64 = "92b4ca979efb45068eed6f8053b1b8fccc337efb3df7ade27338bf3a9b69f600"
     arm64 = "91f78b0cf97604997a7a784cbe51da3bd956706cad23d39c235ec4f89c7af59a"
   }
   use_pinned = var.crdb_version == local.default_crdb_version
 
-  # Values for the script prelude. Each is single-quoted for bash, with any
-  # embedded single quote written as '\'' , so no value can break out.
-  prelude = {
-    CRDB_VERSION = var.crdb_version
-    STORE_PATH   = var.store_path
-    SQL_PORT     = tostring(var.sql_port)
-    HTTP_PORT    = tostring(var.http_port)
-    BINARY_URL   = var.binary_url
-    # Empty unless crdb_version is the default version.
-    PINNED_SHA256_AMD64 = local.use_pinned ? local.pinned_sha256.amd64 : ""
-    PINNED_SHA256_ARM64 = local.use_pinned ? local.pinned_sha256.arm64 : ""
-  }
-  shq = { for k, v in local.prelude : k => "'${replace(v, "'", "'\\''")}'" }
+  install_script = templatefile("${path.module}/scripts/install.sh.tftpl", {
+    ARG_MODULE_DIR_NAME     = local.module_dir_name
+    ARG_CRDB_VERSION        = var.crdb_version
+    ARG_STORE_PATH          = base64encode(var.store_path)
+    ARG_SQL_PORT            = tostring(var.sql_port)
+    ARG_HTTP_PORT           = tostring(var.http_port)
+    ARG_BINARY_URL          = base64encode(var.binary_url)
+    ARG_PINNED_SHA256_AMD64 = local.use_pinned ? local.pinned_sha256.amd64 : ""
+    ARG_PINNED_SHA256_ARM64 = local.use_pinned ? local.pinned_sha256.arm64 : ""
+  })
+  start_script = templatefile("${path.module}/scripts/start.sh.tftpl", {
+    ARG_MODULE_DIR_NAME = local.module_dir_name
+  })
 
   sql_url = "postgres://root@localhost:${var.sql_port}/defaultdb?sslmode=disable"
   env = {
@@ -115,6 +126,18 @@ locals {
     pguser        = { name = "PGUSER", value = "root" }
     pgdatabase    = { name = "PGDATABASE", value = "defaultdb" }
   }
+}
+
+module "coder_utils" {
+  source  = "registry.coder.com/coder/coder-utils/coder"
+  version = "0.0.1"
+
+  agent_id            = var.agent_id
+  module_directory    = "$HOME/${local.module_dir_name}"
+  display_name_prefix = "CockroachDB"
+  icon                = local.icon
+  install_script      = local.install_script
+  start_script        = local.start_script
 }
 
 resource "coder_env" "database_url" {
@@ -153,20 +176,21 @@ resource "coder_env" "pgdatabase" {
   value    = local.env.pgdatabase.value
 }
 
-resource "coder_script" "cockroachdb" {
-  agent_id           = var.agent_id
-  display_name       = "CockroachDB"
-  icon               = "/icon/database.svg"
-  run_on_start       = true
-  start_blocks_login = false
-  # Values are passed as env vars in a prelude, then run.sh is inlined verbatim.
-  # templatefile() would require escaping every bash ${...} and would stop
-  # ShellCheck from linting run.sh directly.
-  script = join("\n", concat(
-    ["#!/usr/bin/env bash"],
-    [for k, v in local.prelude : "export ${k}=${local.shq[k]}"],
-    [file("${path.module}/run.sh")],
-  ))
+resource "coder_app" "db_console" {
+  agent_id     = var.agent_id
+  slug         = "crdb-console"
+  display_name = "CockroachDB Console"
+  url          = "http://localhost:${var.http_port}"
+  icon         = local.icon
+  subdomain    = var.subdomain
+  share        = "owner" # The console has no login in insecure mode.
+  order        = var.order
+
+  healthcheck {
+    url       = "http://localhost:${var.http_port}/health?ready=1"
+    interval  = 5
+    threshold = 24
+  }
 
   lifecycle {
     precondition {
@@ -181,33 +205,22 @@ resource "coder_script" "cockroachdb" {
   }
 }
 
-resource "coder_app" "db_console" {
-  agent_id     = var.agent_id
-  slug         = "crdb-console"
-  display_name = "CockroachDB Console"
-  url          = "http://localhost:${var.http_port}"
-  icon         = "/icon/database.svg"
-  subdomain    = var.subdomain
-  share        = "owner" # The console has no login in insecure mode.
-
-  healthcheck {
-    url       = "http://localhost:${var.http_port}/health?ready=1"
-    interval  = 5
-    threshold = 24
-  }
-}
-
 output "sql_url" {
-  value       = local.sql_url
   description = "SQL connection URL for the workspace-local CockroachDB."
+  value       = local.sql_url
 }
 
 output "http_url" {
-  value       = "http://localhost:${var.http_port}"
   description = "DB Console URL (inside the workspace)."
+  value       = "http://localhost:${var.http_port}"
 }
 
 output "version" {
-  value       = var.crdb_version
   description = "The CockroachDB version this module installs when it downloads. A cockroach already on the workspace PATH takes precedence and is used instead."
+  value       = var.crdb_version
+}
+
+output "scripts" {
+  description = "Ordered list of coder exp sync names produced by this module, in run order."
+  value       = module.coder_utils.scripts
 }

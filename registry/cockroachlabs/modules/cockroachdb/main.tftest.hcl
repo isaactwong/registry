@@ -39,20 +39,20 @@ run "default_version_is_pinned" {
   }
 
   # The variable default must equal the default-version local, or nothing is
-  # pinned. These exports are non-empty only when they are equal.
+  # pinned. The script's pins are non-empty only when they are equal.
   assert {
     condition     = var.crdb_version == local.default_crdb_version
     error_message = "crdb_version default must equal local.default_crdb_version"
   }
 
   assert {
-    condition     = strcontains(coder_script.cockroachdb.script, "export PINNED_SHA256_AMD64='${local.pinned_sha256.amd64}'")
-    error_message = "script must export the pinned amd64 hash for the default version"
+    condition     = strcontains(local.install_script, "PINNED_SHA256_AMD64='${local.pinned_sha256.amd64}'")
+    error_message = "install script must carry the pinned amd64 hash for the default version"
   }
 
   assert {
-    condition     = strcontains(coder_script.cockroachdb.script, "export PINNED_SHA256_ARM64='${local.pinned_sha256.arm64}'")
-    error_message = "script must export the pinned arm64 hash for the default version"
+    condition     = strcontains(local.install_script, "PINNED_SHA256_ARM64='${local.pinned_sha256.arm64}'")
+    error_message = "install script must carry the pinned arm64 hash for the default version"
   }
 
   assert {
@@ -66,16 +66,16 @@ run "other_version_is_not_pinned" {
 
   variables {
     agent_id     = "test-agent-id"
-    crdb_version = "v26.2.0"
+    crdb_version = "v0.0.1"
   }
 
   assert {
-    condition     = strcontains(coder_script.cockroachdb.script, "export PINNED_SHA256_AMD64=''")
+    condition     = strcontains(local.install_script, "PINNED_SHA256_AMD64=''\n")
     error_message = "amd64 pin must be empty for a non-default version"
   }
 
   assert {
-    condition     = strcontains(coder_script.cockroachdb.script, "export PINNED_SHA256_ARM64=''")
+    condition     = strcontains(local.install_script, "PINNED_SHA256_ARM64=''\n")
     error_message = "arm64 pin must be empty for a non-default version"
   }
 }
@@ -135,6 +135,17 @@ run "tilde_store_path_rejected" {
   expect_failures = [var.store_path]
 }
 
+run "root_store_path_rejected" {
+  command = plan
+
+  variables {
+    agent_id   = "test-agent-id"
+    store_path = "/"
+  }
+
+  expect_failures = [var.store_path]
+}
+
 run "absolute_store_path_accepted" {
   command = plan
 
@@ -163,16 +174,6 @@ run "resources_configured" {
   }
 
   assert {
-    condition     = coder_script.cockroachdb.agent_id == "test-agent-id" && coder_script.cockroachdb.run_on_start
-    error_message = "coder_script not wired correctly"
-  }
-
-  assert {
-    condition     = coder_script.cockroachdb.start_blocks_login == false
-    error_message = "coder_script must not block login"
-  }
-
-  assert {
     condition     = coder_app.db_console.url == "http://localhost:26080" && coder_app.db_console.subdomain
     error_message = "coder_app url/subdomain defaults incorrect"
   }
@@ -183,6 +184,16 @@ run "resources_configured" {
   }
 
   assert {
+    condition     = coder_app.db_console.icon == "/icon/cockroachdb.svg"
+    error_message = "DB Console must use the CockroachDB icon"
+  }
+
+  assert {
+    condition     = coder_app.db_console.order == null
+    error_message = "order should default to null"
+  }
+
+  assert {
     condition     = coder_env.database_url.value == "postgres://root@localhost:26257/defaultdb?sslmode=disable"
     error_message = "DATABASE_URL incorrect"
   }
@@ -190,6 +201,50 @@ run "resources_configured" {
   assert {
     condition     = coder_env.cockroach_url.name == "COCKROACH_URL" && coder_env.cockroach_url.value == coder_env.database_url.value
     error_message = "COCKROACH_URL must equal DATABASE_URL"
+  }
+
+  assert {
+    condition     = output.scripts == ["cockroachlabs-cockroachdb-install_script", "cockroachlabs-cockroachdb-start_script"]
+    error_message = "scripts output must list the install and start scripts in run order"
+  }
+
+  assert {
+    condition     = strcontains(local.install_script, "ARG_MODULE_DIR_NAME='.coder-modules/cockroachlabs/cockroachdb'") && strcontains(local.start_script, "ARG_MODULE_DIR_NAME='.coder-modules/cockroachlabs/cockroachdb'")
+    error_message = "scripts must use the module data root"
+  }
+}
+
+run "order_passed_to_app" {
+  command = plan
+
+  variables {
+    agent_id = "test-agent-id"
+    order    = 3
+  }
+
+  assert {
+    condition     = coder_app.db_console.order == 3
+    error_message = "order must reach coder_app"
+  }
+}
+
+run "free_form_values_are_base64_encoded" {
+  command = plan
+
+  variables {
+    agent_id   = "test-agent-id"
+    store_path = "/data/it's $x"
+    binary_url = "https://mirror.example/crdb"
+  }
+
+  assert {
+    condition     = strcontains(local.install_script, "STORE_PATH=$(echo -n '${base64encode("/data/it's $x")}' | base64 -d)")
+    error_message = "store_path must be passed base64-encoded"
+  }
+
+  assert {
+    condition     = strcontains(local.install_script, "BINARY_URL=$(echo -n '${base64encode("https://mirror.example/crdb")}' | base64 -d)")
+    error_message = "binary_url must be passed base64-encoded"
   }
 }
 
@@ -228,5 +283,5 @@ run "port_collision_rejected" {
     http_port = 26257
   }
 
-  expect_failures = [coder_script.cockroachdb]
+  expect_failures = [coder_app.db_console]
 }

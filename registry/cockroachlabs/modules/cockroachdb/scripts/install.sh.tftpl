@@ -1,33 +1,42 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Set by the coder_script prelude (see main.tf). Defaults allow standalone runs.
-: "${CRDB_VERSION:?CRDB_VERSION must be set}"
-: "${STORE_PATH:=}"
-: "${SQL_PORT:=26257}"
-: "${HTTP_PORT:=26080}"
-: "${BINARY_URL:=https://binaries.cockroachdb.com}"
+ARG_MODULE_DIR_NAME='${ARG_MODULE_DIR_NAME}'
+CRDB_VERSION='${ARG_CRDB_VERSION}'
+STORE_PATH=$(echo -n '${ARG_STORE_PATH}' | base64 -d)
+SQL_PORT='${ARG_SQL_PORT}'
+HTTP_PORT='${ARG_HTTP_PORT}'
+BINARY_URL=$(echo -n '${ARG_BINARY_URL}' | base64 -d)
 # Official SHA-256 of the module's default version, per arch. Empty for any
 # other version, which is then verified against the mirror's .sha256sum.
-: "${PINNED_SHA256_AMD64:=}"
-: "${PINNED_SHA256_ARM64:=}"
-: "${READY_TIMEOUT:=60}"
-: "${NET_SYS_DIR:=/sys/class/net}"
-: "${LIBC_PROBE_DIR:=/lib}"
+PINNED_SHA256_AMD64='${ARG_PINNED_SHA256_AMD64}'
+PINNED_SHA256_ARM64='${ARG_PINNED_SHA256_ARM64}'
+# Overridable for tests.
+: "$${READY_TIMEOUT:=60}"
+: "$${NET_SYS_DIR:=/sys/class/net}"
+: "$${LIBC_PROBE_DIR:=/lib}"
 # Set by the Coder agent; on PATH for every workspace session.
-: "${CODER_SCRIPT_BIN_DIR:=$HOME/.local/bin}"
+: "$${CODER_SCRIPT_BIN_DIR:=$HOME/.local/bin}"
 
-[[ -n "$STORE_PATH" ]] || STORE_PATH="$HOME/.crdb-data"
+MODULE_DIR="$HOME/$ARG_MODULE_DIR_NAME"
+SCRIPTS_DIR="$MODULE_DIR/scripts"
+STATE_DIR="$MODULE_DIR/state"
+VERSIONS_DIR="$MODULE_DIR/bin"
+BIN_DIR="$CODER_SCRIPT_BIN_DIR"
+PID_FILE="$STATE_DIR/crdb.pid"
+LOG_FILE="$MODULE_DIR/logs/cockroach.log"
+# start.sh starts CockroachDB only when this exists. coder-utils runs the start
+# script after the install script even if the install script failed.
+INSTALLED_MARKER="$STATE_DIR/installed"
+
+rm -f "$INSTALLED_MARKER"
+
+[[ -n "$STORE_PATH" ]] || STORE_PATH="$MODULE_DIR/data"
 if [[ "$STORE_PATH" != /* ]]; then
   echo "store_path must be an absolute path, got '$STORE_PATH'." >&2
   exit 1
 fi
-BIN_DIR="$CODER_SCRIPT_BIN_DIR"
-STATE_DIR="$HOME/.local/share/cockroachdb"
-PID_FILE="$STATE_DIR/crdb.pid"
-LOG_FILE="$STATE_DIR/crdb.log"
 
-# --- Platform detection ---------------------------------------------------
 if [[ "$(uname -s)" != "Linux" ]]; then
   echo "Unsupported OS: $(uname -s). This module supports Linux workspace agents only." >&2
   exit 1
@@ -48,9 +57,109 @@ command -v curl > /dev/null || {
   exit 1
 }
 
-mkdir -p "$STATE_DIR" "$BIN_DIR" "$STORE_PATH"
+mkdir -p "$SCRIPTS_DIR" "$STATE_DIR" "$MODULE_DIR/logs" "$VERSIONS_DIR" "$BIN_DIR"
 
-# --- Shared-network check (best effort, warn only) ------------------------
+write_script() {
+  cat > "$SCRIPTS_DIR/$1.tmp"
+  chmod +x "$SCRIPTS_DIR/$1.tmp"
+  mv -f "$SCRIPTS_DIR/$1.tmp" "$SCRIPTS_DIR/$1"
+}
+
+write_script crdb-common.sh << 'EOF'
+# shellcheck shell=bash
+# shellcheck disable=SC2034 # CRDB_STORE* are results for the sourcing script.
+# Shared by install.sh, crdb-start, and crdb-reset, which set CRDB_ROOT (the
+# module directory) before sourcing this file.
+: "$${CRDB_ROOT:?CRDB_ROOT must be set}"
+
+# True only if the PID is alive and its command line is a CockroachDB server,
+# so a PID reused by an unrelated process is never mistaken for the database.
+crdb_running() {
+  local cmd
+  kill -0 "$1" 2> /dev/null || return 1
+  if [[ -r "/proc/$1/cmdline" ]]; then
+    cmd="$(tr '\0' ' ' < "/proc/$1/cmdline" 2> /dev/null || true)"
+  else
+    cmd="$(ps -p "$1" -o args= 2> /dev/null || true)"
+  fi
+  [[ "$cmd" == *start-single-node* ]]
+}
+
+# crdb_check_store PATH succeeds if PATH is safe to use as the store, and to
+# empty with crdb-reset. It sets CRDB_STORE (PATH without a trailing /) and
+# CRDB_STORE_REAL (symlinks resolved, when the directory exists). Otherwise it
+# sets CRDB_STORE_REASON and fails. It refuses /, $HOME and its ancestors, and
+# anything overlapping CRDB_ROOT except CRDB_ROOT/data and paths under it.
+crdb_check_store() {
+  local store="$1" p h r
+  local -a candidates homes roots
+  CRDB_STORE=""
+  CRDB_STORE_REAL=""
+  CRDB_STORE_REASON=""
+  if [[ "$store" != /* ]]; then
+    CRDB_STORE_REASON="the store path is not absolute."
+    return 1
+  fi
+  case "$store" in
+    *//* | */./* | */../* | */. | */..)
+      CRDB_STORE_REASON="the store path contains '.', '..', or '//' segments."
+      return 1
+      ;;
+  esac
+  store="$${store%/}"
+  if [[ -z "$store" ]]; then
+    CRDB_STORE_REASON="that is the filesystem root."
+    return 1
+  fi
+
+  # Check the path as written and, when it exists, its symlink-resolved form.
+  CRDB_STORE_REAL="$store"
+  candidates=("$store")
+  if [[ -d "$store" ]]; then
+    CRDB_STORE_REAL="$(cd "$store" && pwd -P)"
+    candidates+=("$CRDB_STORE_REAL")
+  fi
+  homes=("$${HOME%/}")
+  if [[ -d "$HOME" ]]; then homes+=("$(cd "$HOME" && pwd -P)"); fi
+  roots=("$${CRDB_ROOT%/}")
+  if [[ -d "$CRDB_ROOT" ]]; then roots+=("$(cd "$CRDB_ROOT" && pwd -P)"); fi
+
+  for p in "$${candidates[@]}"; do
+    if [[ -z "$p" || "$p" == "/" ]]; then
+      CRDB_STORE_REASON="that is the filesystem root."
+      return 1
+    fi
+    for h in "$${homes[@]}"; do
+      if [[ "$p" == "$h" ]]; then
+        CRDB_STORE_REASON="that is your home directory."
+        return 1
+      fi
+      if [[ "$h" == "$p"/* ]]; then
+        CRDB_STORE_REASON="it contains your home directory."
+        return 1
+      fi
+    done
+    for r in "$${roots[@]}"; do
+      if [[ "$p" == "$r" || "$r" == "$p"/* ]] \
+        || [[ "$p" == "$r"/* && "$p" != "$r/data" && "$p" != "$r/data/"* ]]; then
+        CRDB_STORE_REASON="it overlaps the module's own directory ($CRDB_ROOT). Only $CRDB_ROOT/data may hold the store."
+        return 1
+      fi
+    done
+  done
+  CRDB_STORE="$store"
+}
+EOF
+
+# shellcheck disable=SC2034 # Read by crdb-common.sh.
+CRDB_ROOT="$MODULE_DIR"
+# shellcheck source=/dev/null
+source "$SCRIPTS_DIR/crdb-common.sh"
+if ! crdb_check_store "$STORE_PATH"; then
+  echo "Refusing to use '$STORE_PATH' as the CockroachDB store: $CRDB_STORE_REASON" >&2
+  exit 1
+fi
+
 # Insecure mode is safe only if localhost is private to this workspace. Host
 # container interfaces (docker0, veth*, CNI) suggest host networking on a
 # shared machine. A VM workspace running Docker also matches, so only warn.
@@ -63,17 +172,34 @@ if compgen -G "$NET_SYS_DIR/docker0" > /dev/null \
   echo "Do not use this module with host-networked templates on shared machines." >&2
 fi
 
-# --- Binary resolution ----------------------------------------------------
-# 1. A cockroach baked into the image wins (restricted networks).
-# 2. Otherwise download the pinned version from BINARY_URL.
-PREINSTALLED="$(command -v cockroach 2> /dev/null || true)"
-if [[ -n "$PREINSTALLED" && "$PREINSTALLED" != "$BIN_DIR/cockroach" ]]; then
+# A cockroach baked into the image wins (restricted networks). The module's own
+# link in BIN_DIR is skipped, since it points at an earlier download.
+find_preinstalled() {
+  local dir bin_real dir_real
+  local -a dirs
+  bin_real="$(cd "$BIN_DIR" && pwd -P)"
+  IFS=: read -r -a dirs <<< "$PATH"
+  for dir in $${dirs[@]+"$${dirs[@]}"}; do
+    [[ -n "$dir" && -d "$dir" ]] || continue
+    dir_real="$(cd "$dir" && pwd -P)" || continue
+    [[ "$dir_real" != "$bin_real" ]] || continue
+    if [[ -f "$dir/cockroach" && -x "$dir/cockroach" ]]; then
+      printf '%s\n' "$dir/cockroach"
+      return 0
+    fi
+  done
+  return 0
+}
+
+PREINSTALLED="$(find_preinstalled)"
+if [[ -n "$PREINSTALLED" ]]; then
   BINARY_PATH="$PREINSTALLED"
   echo "Using preinstalled cockroach at $BINARY_PATH (crdb_version is ignored)."
   "$BINARY_PATH" version 2> /dev/null | head -n 1 || true
 else
   echo "Using CockroachDB $CRDB_VERSION on linux-$ARCH"
-  BINARY_PATH="$STATE_DIR/$CRDB_VERSION/cockroach"
+  VERSION_DIR="$VERSIONS_DIR/$CRDB_VERSION"
+  BINARY_PATH="$VERSION_DIR/cockroach"
 
   if [[ ! -x "$BINARY_PATH" ]]; then
     for tool in tar sha256sum; do
@@ -98,12 +224,12 @@ else
       exit 1
     fi
 
-    PREFIX="cockroach-${CRDB_VERSION}.linux-${ARCH}"
-    TARBALL="${PREFIX}.tgz"
-    URL="${BINARY_URL%/}/${TARBALL}"
+    PREFIX="cockroach-$${CRDB_VERSION}.linux-$${ARCH}"
+    TARBALL="$${PREFIX}.tgz"
+    URL="$${BINARY_URL%/}/$${TARBALL}"
     echo "Downloading $URL..."
     WORK="$(mktemp -d)" || {
-      echo "Could not create a temporary directory. Check free disk space in ${TMPDIR:-/tmp}, then re-run." >&2
+      echo "Could not create a temporary directory. Check free disk space in $${TMPDIR:-/tmp}, then re-run." >&2
       exit 1
     }
     trap 'rm -rf "$WORK"' EXIT
@@ -128,7 +254,7 @@ else
         echo "Could not compute the SHA-256 of $WORK/$TARBALL." >&2
         exit 1
       }
-      if [[ "${ACTUAL%% *}" != "$PINNED" ]]; then
+      if [[ "$${ACTUAL%% *}" != "$PINNED" ]]; then
         echo "Checksum mismatch for $URL: the file does not match the checksum pinned in this module. The mirror may be serving a modified or different file." >&2
         exit 1
       fi
@@ -146,22 +272,20 @@ else
     # Extract into the temp dir, then copy and rename within the final
     # directory so an interrupted run never leaves a partial install. The
     # binary moves last: its presence means the install is complete.
-    VERSION_DIR="$(dirname "$BINARY_PATH")"
     mkdir -p "$VERSION_DIR"
-    LISTING="$(tar -tzf "$WORK/$TARBALL" 2> /dev/null || true)"
-    HAS_LIB=0
-    [[ "$LISTING" == *"$PREFIX/lib/"* ]] && HAS_LIB=1
     # The if/return chain is explicit because set -e is off inside "if !".
     install_files() {
-      tar -xzf "$WORK/$TARBALL" -C "$WORK" --strip-components=1 "$PREFIX/cockroach" || return 1
-      if [[ "$HAS_LIB" -eq 1 ]]; then
-        tar -xzf "$WORK/$TARBALL" -C "$WORK" --strip-components=1 "$PREFIX/lib" || return 1
+      local src="$WORK/x/$PREFIX"
+      mkdir -p "$WORK/x" || return 1
+      tar -xzf "$WORK/$TARBALL" -C "$WORK/x" || return 1
+      [[ -f "$src/cockroach" ]] || return 1
+      if [[ -d "$src/lib" ]]; then
         rm -rf "$VERSION_DIR/lib.partial"
-        cp -R "$WORK/lib" "$VERSION_DIR/lib.partial" || return 1
-        rm -rf "${VERSION_DIR:?}/lib"
+        cp -R "$src/lib" "$VERSION_DIR/lib.partial" || return 1
+        rm -rf "$${VERSION_DIR:?}/lib"
         mv "$VERSION_DIR/lib.partial" "$VERSION_DIR/lib" || return 1
       fi
-      cp "$WORK/cockroach" "$BINARY_PATH.partial" || return 1
+      cp "$src/cockroach" "$BINARY_PATH.partial" || return 1
       chmod +x "$BINARY_PATH.partial" || return 1
       mv -f "$BINARY_PATH.partial" "$BINARY_PATH" || return 1
     }
@@ -170,75 +294,68 @@ else
       echo "Failed to extract cockroach to $BINARY_PATH. Check free disk space and permissions, then re-run." >&2
       exit 1
     fi
+    rm -rf "$WORK"
+    trap - EXIT
 
-    # Remove other downloaded versions (v* directories only), unless a running
-    # CockroachDB (per the PID file) may still be using an old version's files.
+    # Remove other downloaded versions, unless a running CockroachDB (per the
+    # PID file) may still be using an old version's files.
     RUNNING_PID="$(cat "$PID_FILE" 2> /dev/null || true)"
-    RUNNING_CMD=""
-    if [[ -n "$RUNNING_PID" ]] && kill -0 "$RUNNING_PID" 2> /dev/null; then
-      if [[ -r "/proc/$RUNNING_PID/cmdline" ]]; then
-        RUNNING_CMD="$(tr '\0' ' ' < "/proc/$RUNNING_PID/cmdline" 2> /dev/null || true)"
-      else
-        RUNNING_CMD="$(ps -p "$RUNNING_PID" -o args= 2> /dev/null || true)"
-      fi
+    if [[ -z "$RUNNING_PID" ]] || ! crdb_running "$RUNNING_PID"; then
+      for old in "$VERSIONS_DIR"/v*; do
+        [[ -d "$old" && "$old" != "$VERSION_DIR" ]] || continue
+        rm -rf "$old"
+      done
     fi
-    for old in "$STATE_DIR"/v*; do
-      [[ -d "$old" && "$old" != "$VERSION_DIR" ]] || continue
-      [[ "$old" != "$STORE_PATH" && "$STORE_PATH" != "$old"/* ]] || continue
-      [[ "$RUNNING_CMD" != *start-single-node* ]] || continue
-      rm -rf "$old"
-    done
   fi
 
   ln -sf "$BINARY_PATH" "$BIN_DIR/cockroach"
 fi
 
-# --- Helper config --------------------------------------------------------
 # The helpers are static scripts that read their settings from this file, so
 # no value is ever spliced into script text. %q quotes each value for bash.
-CONFIG_FILE="$STATE_DIR/config.env"
 {
   printf '%s=%q\n' PID_FILE "$PID_FILE"
   printf '%s=%q\n' STORE_PATH "$STORE_PATH"
-  printf '%s=%q\n' STATE_DIR "$STATE_DIR"
   printf '%s=%q\n' BINARY_PATH "$BINARY_PATH"
   printf '%s=%q\n' LOG_FILE "$LOG_FILE"
   printf '%s=%q\n' SQL_PORT "$SQL_PORT"
   printf '%s=%q\n' HTTP_PORT "$HTTP_PORT"
   printf '%s=%q\n' READY_TIMEOUT_DEFAULT "$READY_TIMEOUT"
-  printf '%s=%q\n' BIN_DIR "$BIN_DIR"
-} > "$CONFIG_FILE.tmp"
-mv -f "$CONFIG_FILE.tmp" "$CONFIG_FILE"
+} > "$STATE_DIR/config.env.tmp"
+mv -f "$STATE_DIR/config.env.tmp" "$STATE_DIR/config.env"
 
-# --- crdb-start helper ----------------------------------------------------
-cat > "$BIN_DIR/crdb-start" << 'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-CONFIG_FILE="$HOME/.local/share/cockroachdb/config.env"
-if [[ ! -f "$CONFIG_FILE" ]]; then
+# Each helper starts with its CRDB_ROOT, quoted with %q, so it can find
+# config.env and crdb-common.sh when run through its link in BIN_DIR.
+helper_prelude() {
+  printf '#!/usr/bin/env bash\nset -euo pipefail\n'
+  printf 'CRDB_ROOT=%q\n' "$MODULE_DIR"
+}
+
+{
+  helper_prelude
+  cat << 'EOF'
+CONFIG_FILE="$CRDB_ROOT/state/config.env"
+if [[ ! -f "$CONFIG_FILE" || ! -f "$CRDB_ROOT/scripts/crdb-common.sh" ]]; then
   echo "CockroachDB module config not found at $CONFIG_FILE. Restart the workspace to reinstall." >&2
   exit 1
 fi
 # shellcheck source=/dev/null
+source "$CRDB_ROOT/scripts/crdb-common.sh"
+# shellcheck source=/dev/null
 source "$CONFIG_FILE"
-# True only if the PID is alive and its command line is a CockroachDB server,
-# so a PID reused by an unrelated process is never mistaken for the database.
-crdb_running() {
-  local cmd
-  kill -0 "$1" 2> /dev/null || return 1
-  if [[ -r "/proc/$1/cmdline" ]]; then
-    cmd="$(tr '\0' ' ' < "/proc/$1/cmdline" 2> /dev/null || true)"
-  else
-    cmd="$(ps -p "$1" -o args= 2> /dev/null || true)"
-  fi
-  [[ "$cmd" == *start-single-node* ]]
-}
+: "$${PID_FILE:?}" "$${STORE_PATH:?}" "$${BINARY_PATH:?}" "$${LOG_FILE:?}"
+: "$${SQL_PORT:?}" "$${HTTP_PORT:?}" "$${READY_TIMEOUT_DEFAULT:?}"
+
+if ! crdb_check_store "$STORE_PATH"; then
+  echo "Refusing to use '$STORE_PATH' as the CockroachDB store: $CRDB_STORE_REASON" >&2
+  exit 1
+fi
 if [[ -f "$PID_FILE" ]] && crdb_running "$(cat "$PID_FILE")"; then
   echo "CockroachDB already running (PID $(cat "$PID_FILE"))."
   exit 0
 fi
 rm -f "$PID_FILE"
-mkdir -p "$STORE_PATH"
+mkdir -p "$STORE_PATH" "$(dirname "$LOG_FILE")"
 echo "Starting CockroachDB..."
 # No diagnostics reporting: workspaces may sit inside a no-egress perimeter.
 COCKROACH_SKIP_ENABLING_DIAGNOSTIC_REPORTING=true nohup "$BINARY_PATH" start-single-node \
@@ -249,8 +366,10 @@ COCKROACH_SKIP_ENABLING_DIAGNOSTIC_REPORTING=true nohup "$BINARY_PATH" start-sin
   --pid-file="$PID_FILE" \
   >> "$LOG_FILE" 2>&1 &
 CHILD=$!
-TIMEOUT="${READY_TIMEOUT:-$READY_TIMEOUT_DEFAULT}"
-for _ in $(seq 1 "$TIMEOUT"); do
+TIMEOUT="$${READY_TIMEOUT:-$READY_TIMEOUT_DEFAULT}"
+# Bounded by elapsed time, not iterations: each health check can take up to 2s.
+SECONDS=0
+while ((SECONDS < TIMEOUT)); do
   # Sleep first so a child that dies at startup is seen before health is asked.
   sleep 1
   if ! kill -0 "$CHILD" 2> /dev/null; then
@@ -268,67 +387,38 @@ for _ in $(seq 1 "$TIMEOUT"); do
     exit 0
   fi
 done
-echo "CockroachDB not ready after ${TIMEOUT}s. Last log lines:" >&2
+echo "CockroachDB not ready after $${SECONDS}s. Last log lines:" >&2
 tail -n 20 "$LOG_FILE" >&2 || true
 echo "Full log: $LOG_FILE" >&2
 exit 1
 EOF
-chmod +x "$BIN_DIR/crdb-start"
+} | write_script crdb-start
 
-# --- crdb-reset helper ----------------------------------------------------
-cat > "$BIN_DIR/crdb-reset" << 'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-CONFIG_FILE="$HOME/.local/share/cockroachdb/config.env"
-if [[ ! -f "$CONFIG_FILE" ]]; then
+{
+  helper_prelude
+  cat << 'EOF'
+CONFIG_FILE="$CRDB_ROOT/state/config.env"
+if [[ ! -f "$CONFIG_FILE" || ! -f "$CRDB_ROOT/scripts/crdb-common.sh" ]]; then
   echo "CockroachDB module config not found at $CONFIG_FILE. Restart the workspace to reinstall." >&2
   exit 1
 fi
 # shellcheck source=/dev/null
+source "$CRDB_ROOT/scripts/crdb-common.sh"
+# shellcheck source=/dev/null
 source "$CONFIG_FILE"
+: "$${PID_FILE:?}" "$${STORE_PATH:?}" "$${HTTP_PORT:?}"
 
 refuse() {
   echo "Refusing to wipe '$STORE_PATH': $1" >&2
   exit 1
 }
 
-# --- Is this path safe to empty? ---
-[[ "$STORE_PATH" == /* ]] || refuse "the store path is not absolute."
-case "$STORE_PATH" in
-  *//* | */./* | */../* | */. | */..)
-    refuse "the store path contains '.', '..', or '//' segments."
-    ;;
-esac
-STORE="${STORE_PATH%/}"
-[[ -n "$STORE" ]] || refuse "that is the filesystem root."
-
-# Check the path as written and, when it exists, its symlink-resolved form.
+crdb_check_store "$STORE_PATH" || refuse "$CRDB_STORE_REASON"
+STORE="$CRDB_STORE"
 # find does not follow a symlink given as its starting point, so every find
 # below uses the resolved path.
-STORE_REAL="$STORE"
-CANDIDATES=("$STORE")
-if [[ -d "$STORE" ]]; then
-  STORE_REAL="$(cd "$STORE" && pwd -P)"
-  CANDIDATES+=("$STORE_REAL")
-fi
-HOME_DIRS=("${HOME%/}")
-STATE_DIRS=("${STATE_DIR%/}")
-if [[ -d "$HOME" ]]; then HOME_DIRS+=("$(cd "$HOME" && pwd -P)"); fi
-if [[ -d "$STATE_DIR" ]]; then STATE_DIRS+=("$(cd "$STATE_DIR" && pwd -P)"); fi
-for p in "${CANDIDATES[@]}"; do
-  [[ -n "$p" && "$p" != "/" ]] || refuse "that is the filesystem root."
-  for h in "${HOME_DIRS[@]}"; do
-    [[ "$p" != "$h" ]] || refuse "that is your home directory."
-    [[ "$h" != "$p"/* ]] || refuse "it contains your home directory."
-  done
-  for s in "${STATE_DIRS[@]}"; do
-    if [[ "$p" == "$s" || "$p" == "$s"/* || "$s" == "$p"/* ]]; then
-      refuse "it overlaps the module's own state directory ($STATE_DIR)."
-    fi
-  done
-done
+STORE_REAL="$CRDB_STORE_REAL"
 
-# --- Is it empty or a CockroachDB store? ---
 if [[ -e "$STORE" && ! -d "$STORE" ]]; then
   refuse "it is not a directory."
 fi
@@ -346,22 +436,11 @@ if [[ -d "$STORE_REAL" && -n "$(find "$STORE_REAL" -mindepth 1 -maxdepth 1 ! -na
   else
     HAS_OTHER="$(find "$STORE_REAL" -mindepth 1 -maxdepth 1 ! -name 'lost+found' ! -name 'cockroach-temp*' ! -name temp-dirs-record.txt -print -quit)"
   fi
-  if [[ ( -z "$HAS_MANIFEST" || -z "$HAS_POINTER" ) && -z "$HAS_VERSION" && -n "$HAS_OTHER" ]]; then
+  if [[ (-z "$HAS_MANIFEST" || -z "$HAS_POINTER") && -z "$HAS_VERSION" && -n "$HAS_OTHER" ]]; then
     refuse "the directory is not empty and does not look like a CockroachDB store (no MANIFEST-* file with CURRENT or marker.manifest.*). Use a dedicated directory for store_path."
   fi
 fi
 
-# True only if the PID is alive and its command line is a CockroachDB server.
-crdb_running() {
-  local cmd
-  kill -0 "$1" 2> /dev/null || return 1
-  if [[ -r "/proc/$1/cmdline" ]]; then
-    cmd="$(tr '\0' ' ' < "/proc/$1/cmdline" 2> /dev/null || true)"
-  else
-    cmd="$(ps -p "$1" -o args= 2> /dev/null || true)"
-  fi
-  [[ "$cmd" == *start-single-node* ]]
-}
 STOPPED=0
 if [[ -f "$PID_FILE" ]] && crdb_running "$(cat "$PID_FILE")"; then
   STOPPED=1
@@ -388,14 +467,12 @@ if [[ -d "$STORE_REAL" ]]; then
   find "$STORE_REAL" -mindepth 1 -maxdepth 1 ! -name 'lost+found' -exec rm -rf {} +
 fi
 echo "Store at $STORE_PATH wiped. Starting a fresh cluster..."
-exec "$BIN_DIR/crdb-start"
+exec "$CRDB_ROOT/scripts/crdb-start"
 EOF
-chmod +x "$BIN_DIR/crdb-reset"
+} | write_script crdb-reset
 
-# --- Start ----------------------------------------------------------------
-# exec skips the EXIT trap, so clean up the download temp dir explicitly.
-if [[ -n "${WORK:-}" ]]; then
-  rm -rf "$WORK"
-fi
-trap - EXIT
-exec "$BIN_DIR/crdb-start"
+for helper in crdb-start crdb-reset; do
+  ln -sf "$SCRIPTS_DIR/$helper" "$BIN_DIR/$helper"
+done
+
+touch "$INSTALLED_MARKER"
