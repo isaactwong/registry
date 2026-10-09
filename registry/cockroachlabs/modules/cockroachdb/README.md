@@ -105,11 +105,13 @@ default and survives workspace stop/start **only if the home directory is on a
 persistent volume**. Coder's standard Docker and Kubernetes templates do this.
 Set `store_path` to point elsewhere.
 
-`store_path` must be an absolute path (no `~`) to a **dedicated directory used
+`store_path` must be an absolute path (no `~`, no `.` or `..` segments, no `//`)
+to a **dedicated directory used
 only for CockroachDB**. `crdb-reset` deletes the directory's contents, and it
 refuses any non-empty directory that doesn't look like a CockroachDB store.
 The module refuses to start with a store at `/`, at `$HOME` or any parent of
-it, or inside its own directory other than under `data/`.
+it, or inside its own directory other than under `data/`. Symlinks are
+resolved first, including in the parent of a directory that doesn't exist yet.
 
 ## Coming from Postgres
 
@@ -308,8 +310,10 @@ rewrites the config and helpers.
 
 **Unsafe store path.** The install script or `crdb-start` fails with
 `Refusing to use '<path>' as the CockroachDB store:` and a reason. The store
-must not be `/`, `$HOME` or a parent of it, or a path inside
-`~/.coder-modules/cockroachlabs/cockroachdb` other than under `data/`. Set
+must be an absolute path with no `.`, `..`, or `//` segments. It must not be
+`/`, `$HOME` or a parent of it, or a path inside
+`~/.coder-modules/cockroachlabs/cockroachdb` other than under `data/`, whether
+reached directly or through a symlink. Set
 `store_path` to a dedicated directory.
 
 **Starting over.** `crdb-reset` stops the database and **deletes all data** in

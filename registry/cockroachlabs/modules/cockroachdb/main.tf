@@ -31,8 +31,8 @@ variable "store_path" {
   default     = ""
 
   validation {
-    condition     = can(regex("^(/[^~]*)?$", var.store_path)) && !can(regex("^/+$", var.store_path))
-    error_message = "store_path must be empty or an absolute path (starting with /) that does not contain ~ and is not /."
+    condition     = can(regex("^(/[^~]*)?$", var.store_path)) && !can(regex("^/+$", var.store_path)) && !can(regex("//|/\\.{1,2}(/|$)", var.store_path))
+    error_message = "store_path must be empty or an absolute path (starting with /) that does not contain ~, '.' or '..' segments, or '//', and is not /."
   }
 }
 

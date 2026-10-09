@@ -928,6 +928,56 @@ describe("module scripts", () => {
     expect(existsSync(configFile())).toBe(true);
   });
 
+  it("refuses a first-start store below a symlinked parent that leads into the module directory", async () => {
+    linuxAmd64();
+    stub("curl", "exit 22");
+    plantFakeBinary(DEFAULT_VERSION);
+    mkdirSync(stateDir(), { recursive: true });
+    const link = join(home, "lnk");
+    symlinkSync(stateDir(), link);
+    const r = await run(env(), {
+      vars: { store_path: join(link, "a", "new") },
+    });
+    expect(r.installCode).not.toBe(0);
+    expect(r.out).toContain("overlaps the module's own directory");
+    expect(existsSync(join(stateDir(), "a"))).toBe(false);
+    expect(existsSync(pidFile())).toBe(false);
+  });
+
+  it("crdb-start refuses a first-start store below a symlinked parent and creates nothing", async () => {
+    linuxAmd64();
+    stub("curl", "exit 22");
+    plantFakeBinary(DEFAULT_VERSION);
+    await run();
+    await $`kill ${readFileSync(pidFile(), "utf-8").trim()}`.nothrow().quiet();
+    rmSync(pidFile());
+    const link = join(home, "lnk");
+    symlinkSync(stateDir(), link);
+    setConfigStore(join(link, "new"));
+    const r = await helper("crdb-start");
+    expect(r.exitCode).not.toBe(0);
+    expect(r.stderr.toString()).toContain(
+      "overlaps the module's own directory",
+    );
+    expect(existsSync(join(stateDir(), "new"))).toBe(false);
+    expect(existsSync(pidFile())).toBe(false);
+  });
+
+  it("creates a first-start store below a symlinked parent that leads somewhere safe", async () => {
+    linuxAmd64();
+    stub("curl", 'case "$*" in *health*) exit 0;; esac; exit 22');
+    plantFakeBinary(DEFAULT_VERSION);
+    const target = join(home, "volume");
+    mkdirSync(target);
+    const link = join(home, "lnk");
+    symlinkSync(target, link);
+    const r = await run(env(), {
+      vars: { store_path: join(link, "new") },
+    });
+    expect(r.exitCode).toBe(0);
+    expect(existsSync(join(target, "new"))).toBe(true);
+  });
+
   it("crdb-reset ignores and keeps lost+found", async () => {
     linuxAmd64();
     stub("curl", "exit 22");

@@ -87,11 +87,12 @@ crdb_running() {
 
 # crdb_check_store PATH succeeds if PATH is safe to use as the store, and to
 # empty with crdb-reset. It sets CRDB_STORE (PATH without a trailing /) and
-# CRDB_STORE_REAL (symlinks resolved, when the directory exists). Otherwise it
+# CRDB_STORE_REAL (symlinks resolved; for a directory that does not exist yet,
+# its nearest existing ancestor is resolved and the rest appended). Otherwise it
 # sets CRDB_STORE_REASON and fails. It refuses /, $HOME and its ancestors, and
 # anything overlapping CRDB_ROOT except CRDB_ROOT/data and paths under it.
 crdb_check_store() {
-  local store="$1" p h r
+  local store="$1" p h r probe rest real
   local -a candidates homes roots
   CRDB_STORE=""
   CRDB_STORE_REAL=""
@@ -112,13 +113,21 @@ crdb_check_store() {
     return 1
   fi
 
-  # Check the path as written and, when it exists, its symlink-resolved form.
-  CRDB_STORE_REAL="$store"
+  # Check the path as written and its symlink-resolved form. A directory that
+  # does not exist yet will be created below its nearest existing ancestor, so
+  # resolve that ancestor: a symlinked parent must not hide the real location.
+  probe="$store"
+  rest=""
+  while [[ ! -d "$probe" ]]; do
+    rest="/$${probe##*/}$rest"
+    probe="$${probe%/*}"
+    [[ -n "$probe" ]] || probe="/"
+  done
+  real="$(cd "$probe" && pwd -P)"
+  [[ "$real" != "/" ]] || real=""
+  CRDB_STORE_REAL="$real$rest"
   candidates=("$store")
-  if [[ -d "$store" ]]; then
-    CRDB_STORE_REAL="$(cd "$store" && pwd -P)"
-    candidates+=("$CRDB_STORE_REAL")
-  fi
+  if [[ "$CRDB_STORE_REAL" != "$store" ]]; then candidates+=("$CRDB_STORE_REAL"); fi
   homes=("$${HOME%/}")
   if [[ -d "$HOME" ]]; then homes+=("$(cd "$HOME" && pwd -P)"); fi
   roots=("$${CRDB_ROOT%/}")

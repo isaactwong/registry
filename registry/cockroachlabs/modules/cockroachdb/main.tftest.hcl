@@ -146,6 +146,48 @@ run "root_store_path_rejected" {
   expect_failures = [var.store_path]
 }
 
+run "dotdot_store_path_rejected" {
+  command = plan
+
+  variables {
+    agent_id   = "test-agent-id"
+    store_path = "/a/../b"
+  }
+
+  expect_failures = [var.store_path]
+}
+
+run "dot_store_path_rejected" {
+  command = plan
+
+  variables {
+    agent_id   = "test-agent-id"
+    store_path = "/a/./b"
+  }
+
+  expect_failures = [var.store_path]
+}
+
+run "double_slash_store_path_rejected" {
+  command = plan
+
+  variables {
+    agent_id   = "test-agent-id"
+    store_path = "/data//x"
+  }
+
+  expect_failures = [var.store_path]
+}
+
+run "dotted_name_store_path_accepted" {
+  command = plan
+
+  variables {
+    agent_id   = "test-agent-id"
+    store_path = "/data/.crdb/store.v1.."
+  }
+}
+
 run "absolute_store_path_accepted" {
   command = plan
 
