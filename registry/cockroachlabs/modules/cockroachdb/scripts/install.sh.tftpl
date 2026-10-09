@@ -168,7 +168,7 @@ if compgen -G "$NET_SYS_DIR/docker0" > /dev/null \
   || compgen -G "$NET_SYS_DIR/cni*" > /dev/null \
   || compgen -G "$NET_SYS_DIR/cali*" > /dev/null; then
   echo "WARNING: this workspace may share its host's network (container interfaces found in $NET_SYS_DIR)." >&2
-  echo "CockroachDB runs without a password. On a machine shared by several developers, others may reach localhost:$SQL_PORT." >&2
+  echo "CockroachDB runs without a password. On a machine shared by several developers, others may reach 127.0.0.1:$SQL_PORT." >&2
   echo "Do not use this module with host-networked templates on shared machines." >&2
 fi
 
@@ -361,8 +361,8 @@ echo "Starting CockroachDB..."
 COCKROACH_SKIP_ENABLING_DIAGNOSTIC_REPORTING=true nohup "$BINARY_PATH" start-single-node \
   --insecure \
   --store="$STORE_PATH" \
-  --listen-addr="localhost:$SQL_PORT" \
-  --http-addr="localhost:$HTTP_PORT" \
+  --listen-addr="127.0.0.1:$SQL_PORT" \
+  --http-addr="127.0.0.1:$HTTP_PORT" \
   --pid-file="$PID_FILE" \
   >> "$LOG_FILE" 2>&1 &
 CHILD=$!
@@ -382,8 +382,8 @@ while ((SECONDS < TIMEOUT)); do
   # our child's PID there means a health answer comes from our process, not
   # from another one holding the port.
   if [[ -f "$PID_FILE" && "$(cat "$PID_FILE" 2> /dev/null || true)" == "$CHILD" ]] \
-    && curl -fsS --max-time 2 "http://localhost:$HTTP_PORT/health?ready=1" > /dev/null 2>&1; then
-    echo "CockroachDB ready: SQL localhost:$SQL_PORT | Console http://localhost:$HTTP_PORT"
+    && curl -fsS --max-time 2 "http://127.0.0.1:$HTTP_PORT/health?ready=1" > /dev/null 2>&1; then
+    echo "CockroachDB ready: SQL 127.0.0.1:$SQL_PORT | Console http://127.0.0.1:$HTTP_PORT"
     exit 0
   fi
 done
@@ -457,7 +457,7 @@ if [[ -f "$PID_FILE" ]] && crdb_running "$(cat "$PID_FILE")"; then
   fi
 fi
 # Without a PID file we cannot stop the database, so never wipe a live one.
-if [[ "$STOPPED" -eq 0 ]] && curl -fsS --max-time 2 "http://localhost:$HTTP_PORT/health" > /dev/null 2>&1; then
+if [[ "$STOPPED" -eq 0 ]] && curl -fsS --max-time 2 "http://127.0.0.1:$HTTP_PORT/health" > /dev/null 2>&1; then
   echo "CockroachDB is answering on port $HTTP_PORT, but not as the process recorded in $PID_FILE; stop it first." >&2
   exit 1
 fi

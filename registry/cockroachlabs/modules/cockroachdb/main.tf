@@ -116,12 +116,12 @@ locals {
     ARG_MODULE_DIR_NAME = local.module_dir_name
   })
 
-  sql_url = "postgres://root@localhost:${var.sql_port}/defaultdb?sslmode=disable"
+  sql_url = "postgres://root@127.0.0.1:${var.sql_port}/defaultdb?sslmode=disable"
   env = {
     database_url = { name = "DATABASE_URL", value = local.sql_url }
     # Read by `cockroach sql` and friends, so they work with no flags.
     cockroach_url = { name = "COCKROACH_URL", value = local.sql_url }
-    pghost        = { name = "PGHOST", value = "localhost" }
+    pghost        = { name = "PGHOST", value = "127.0.0.1" }
     pgport        = { name = "PGPORT", value = tostring(var.sql_port) }
     pguser        = { name = "PGUSER", value = "root" }
     pgdatabase    = { name = "PGDATABASE", value = "defaultdb" }
@@ -180,14 +180,14 @@ resource "coder_app" "db_console" {
   agent_id     = var.agent_id
   slug         = "crdb-console"
   display_name = "CockroachDB Console"
-  url          = "http://localhost:${var.http_port}"
+  url          = "http://127.0.0.1:${var.http_port}"
   icon         = local.icon
   subdomain    = var.subdomain
   share        = "owner" # The console has no login in insecure mode.
   order        = var.order
 
   healthcheck {
-    url       = "http://localhost:${var.http_port}/health?ready=1"
+    url       = "http://127.0.0.1:${var.http_port}/health?ready=1"
     interval  = 5
     threshold = 24
   }
@@ -212,7 +212,7 @@ output "sql_url" {
 
 output "http_url" {
   description = "DB Console URL (inside the workspace)."
-  value       = "http://localhost:${var.http_port}"
+  value       = "http://127.0.0.1:${var.http_port}"
 }
 
 output "version" {

@@ -116,10 +116,10 @@ describe("cockroachdb terraform", async () => {
         .map((i) => [i.attributes.name, i.attributes.value]),
     );
     expect(env).toEqual({
-      DATABASE_URL: "postgres://root@localhost:26300/defaultdb?sslmode=disable",
+      DATABASE_URL: "postgres://root@127.0.0.1:26300/defaultdb?sslmode=disable",
       COCKROACH_URL:
-        "postgres://root@localhost:26300/defaultdb?sslmode=disable",
-      PGHOST: "localhost",
+        "postgres://root@127.0.0.1:26300/defaultdb?sslmode=disable",
+      PGHOST: "127.0.0.1",
       PGPORT: "26300",
       PGUSER: "root",
       PGDATABASE: "defaultdb",
@@ -313,7 +313,40 @@ describe("module scripts", () => {
       .trim()
       .split("\n");
     expect(args).toContain(`--store=${store}`);
-    expect(args).toContain("--listen-addr=localhost:26300");
+    expect(args).toContain("--listen-addr=127.0.0.1:26300");
+    expect(args).toContain("--http-addr=127.0.0.1:26080");
+  });
+
+  it("checks readiness and health over IPv4, not localhost", async () => {
+    linuxAmd64();
+    stub(
+      "curl",
+      'echo "$@" >> "$HOME/curl.log"; case "$*" in *health*) exit 0;; esac; exit 22',
+    );
+    plantFakeBinary(DEFAULT_VERSION);
+    const r = await run();
+    expect(r.exitCode).toBe(0);
+    const calls = readFileSync(join(home, "curl.log"), "utf-8");
+    expect(calls).toContain("http://127.0.0.1:26080/health?ready=1");
+    expect(calls).not.toContain("localhost");
+    expect(r.out).toContain(
+      "CockroachDB ready: SQL 127.0.0.1:26257 | Console http://127.0.0.1:26080",
+    );
+  });
+
+  it("crdb-reset checks the console port over IPv4", async () => {
+    linuxAmd64();
+    stub("curl", "exit 22");
+    plantFakeBinary(DEFAULT_VERSION);
+    await run();
+    await $`kill ${readFileSync(pidFile(), "utf-8").trim()}`.nothrow().quiet();
+    rmSync(pidFile());
+    fakeStore(defaultStore());
+    stub("curl", 'echo "$@" >> "$HOME/curl.log"; exit 22');
+    await reset();
+    const calls = readFileSync(join(home, "curl.log"), "utf-8");
+    expect(calls).toContain("http://127.0.0.1:26080/health");
+    expect(calls).not.toContain("localhost");
   });
 
   it("lays out scripts, logs, and state under the module root", async () => {
@@ -993,7 +1026,7 @@ describe("module scripts", () => {
     expect(r.stdout.toString()).toContain("wiped");
     const calls = readFileSync(join(home, "curl.log"), "utf-8")
       .split("\n")
-      .filter((l) => l.endsWith(":26080/health"));
+      .filter((l) => l.endsWith("127.0.0.1:26080/health"));
     expect(calls.length).toBe(1);
     expect(calls[0]).toContain("--max-time 2");
   });

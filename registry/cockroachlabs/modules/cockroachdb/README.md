@@ -40,7 +40,7 @@ missing on a long-lived VM, restart the workspace.
 > The module needs Coder v2.30 or later, because it orders its install and
 > start scripts with `coder exp sync` (through the `coder-utils` module).
 
-The database runs in insecure mode. The SQL port listens on `localhost` only,
+The database runs in insecure mode. The SQL port listens on `127.0.0.1` only,
 so it is not reachable from outside the workspace (see [Host networking](#host-networking)).
 
 > [!WARNING]
@@ -169,20 +169,22 @@ Nothing else connects outbound at runtime. The module needs no `sudo` or root.
 
 ## Host networking
 
-CockroachDB runs without a password and listens on `localhost`. That's private
+CockroachDB runs without a password and listens on `127.0.0.1` (IPv4 loopback;
+the connection URLs use that address too, so clients that prefer IPv6 for
+`localhost` still connect). That's private
 in normal Docker, Kubernetes, and VM workspaces.
 
 > [!WARNING]
 > If your template uses host networking (`network_mode = "host"` or
-> `hostNetwork: true`) on a machine shared by several developers, `localhost`
-> is shared too, and other users may reach each other's databases. Ports will
+> `hostNetwork: true`) on a machine shared by several developers, the loopback
+> interface is shared too, and other users may reach each other's databases. Ports will
 > also collide. Don't use this module with host-networked templates on shared
 > machines.
 
 The module prints a warning in the install log when it sees signs of this. The
 same warning can be a false positive in a VM workspace that runs Docker, and it
 can also appear in Docker-in-Docker workspaces (envbox, sysbox), where
-`localhost` is private.
+the loopback interface is private.
 
 ## Resource sizing
 

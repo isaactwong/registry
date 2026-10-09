@@ -174,7 +174,7 @@ run "resources_configured" {
   }
 
   assert {
-    condition     = coder_app.db_console.url == "http://localhost:26080" && coder_app.db_console.subdomain
+    condition     = coder_app.db_console.url == "http://127.0.0.1:26080" && coder_app.db_console.subdomain
     error_message = "coder_app url/subdomain defaults incorrect"
   }
 
@@ -194,7 +194,7 @@ run "resources_configured" {
   }
 
   assert {
-    condition     = coder_env.database_url.value == "postgres://root@localhost:26257/defaultdb?sslmode=disable"
+    condition     = coder_env.database_url.value == "postgres://root@127.0.0.1:26257/defaultdb?sslmode=disable"
     error_message = "DATABASE_URL incorrect"
   }
 
@@ -259,12 +259,12 @@ run "outputs_reflect_inputs" {
   }
 
   assert {
-    condition     = output.sql_url == "postgres://root@localhost:26300/defaultdb?sslmode=disable"
+    condition     = output.sql_url == "postgres://root@127.0.0.1:26300/defaultdb?sslmode=disable"
     error_message = "sql_url should reflect sql_port"
   }
 
   assert {
-    condition     = output.http_url == "http://localhost:26090"
+    condition     = output.http_url == "http://127.0.0.1:26090"
     error_message = "http_url should reflect http_port"
   }
 
