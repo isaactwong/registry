@@ -60,10 +60,15 @@ Everything the module writes lives under
 - `bin/<version>/` holds a downloaded `cockroach` and its `lib/` directory. The
   module keeps the active version and the one active before it, and removes
   older ones after a download, so disk use is at most two versions.
-- `state/` holds `config.env` (the helpers' settings), `crdb.pid`, and
-  `active_version` and `previous_version`, which the module uses to decide what
-  to keep.
+- `state/` holds `config.env` (the helpers' settings), `crdb.pid`, the
+  `installed` marker (written when the install script finishes; the start
+  script runs only if it exists), and `active_version` and `previous_version`,
+  which the module uses to decide what to keep.
 - `data/` is the default store.
+
+`cockroach` (when the module downloads it), `crdb-start`, and `crdb-reset` are
+linked into Coder's script bin directory (`CODER_SCRIPT_BIN_DIR`), which is on
+`PATH`.
 
 ## Examples
 
@@ -91,10 +96,7 @@ module "cockroachdb" {
 }
 ```
 
-<!-- TODO(task 6): Update this section after Task 6's path-based app routing check confirms whether the
-DB Console works behind path-based routing. If it doesn't, replace this example
-with a note that `subdomain = true` is required, and enforce it with a
-validation. -->
+<!-- TODO: confirm whether the DB Console works behind path-based app routing, then keep or remove this example. -->
 
 ## Persistence
 
@@ -121,9 +123,7 @@ to hit in the dev loop:
 - **`SERIAL` columns** produce unique but non-sequential IDs.
 - **Extensions.** Many Postgres extensions aren't available.
 
-<!-- TODO(task 6): Fill in and expand from the Task 6 sample-app results, one
-entry per change a stack needed. Link to the CockroachDB PostgreSQL
-compatibility docs and MOLT Schema Conversion. -->
+<!-- TODO: expand with notes from testing common Postgres app stacks (Spring Boot + Flyway, Django, Node + Prisma, Go + pgx). -->
 
 ## Restricted networks
 
