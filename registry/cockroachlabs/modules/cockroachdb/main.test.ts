@@ -468,6 +468,33 @@ describe("module scripts", () => {
     expect(readFileSync(pidFile(), "utf-8").trim()).not.toBe(firstPid);
   });
 
+  it("crdb-reset treats a process that is no longer CockroachDB as stopped", async () => {
+    linuxAmd64();
+    stub("curl", "exit 22");
+    // On SIGTERM the process stays alive but its command line stops being a
+    // CockroachDB server, as a zombie's does when PID 1 does not reap it.
+    plantFakeBinary(
+      DEFAULT_VERSION,
+      '#!/bin/sh\n[ "$1" = version ] && exit 0\nfor a in "$@"; do case "$a" in --pid-file=*) echo $$ > "${a#--pid-file=}";; esac; done\ntrap \'exec sleep 3600\' TERM\nwhile :; do sleep 1; done\n',
+    );
+    await run();
+    const firstPid = Number(readFileSync(pidFile(), "utf-8").trim());
+    extraPids.push(firstPid);
+    const store = defaultStore();
+    writeFileSync(join(store, "CURRENT"), "MANIFEST-000001\n");
+    writeFileSync(join(store, "MANIFEST-000001"), "x");
+    writeFileSync(join(store, "marker"), "x");
+
+    const t0 = Date.now();
+    const r = await reset();
+
+    expect(r.stderr.toString()).not.toContain("did not stop");
+    expect(r.stdout.toString()).toContain("wiped");
+    expect(Date.now() - t0).toBeLessThan(15_000);
+    expect(existsSync(join(store, "marker"))).toBe(false);
+    expect(alive(firstPid)).toBe(true);
+  });
+
   it("starts with diagnostics reporting disabled", async () => {
     linuxAmd64();
     stub("curl", "exit 22");

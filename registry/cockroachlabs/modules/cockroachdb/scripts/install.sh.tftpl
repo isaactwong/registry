@@ -471,11 +471,13 @@ if [[ -f "$PID_FILE" ]] && crdb_running "$(cat "$PID_FILE")"; then
   PID="$(cat "$PID_FILE")"
   echo "Stopping CockroachDB (PID $PID)..."
   kill "$PID"
+  # crdb_running, not kill -0: a zombie that PID 1 never reaps still answers
+  # kill -0, but its command line is empty.
   for _ in $(seq 1 30); do
-    kill -0 "$PID" 2> /dev/null || break
+    crdb_running "$PID" || break
     sleep 1
   done
-  if kill -0 "$PID" 2> /dev/null; then
+  if crdb_running "$PID"; then
     echo "CockroachDB did not stop within 30s; aborting reset." >&2
     exit 1
   fi
