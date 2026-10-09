@@ -169,9 +169,10 @@ if ! crdb_check_store "$STORE_PATH"; then
   exit 1
 fi
 
-# Insecure mode is safe only if localhost is private to this workspace. Host
-# container interfaces (docker0, veth*, CNI) suggest host networking on a
-# shared machine. A VM workspace running Docker also matches, so only warn.
+# Insecure mode is safe only if the 127.0.0.1 loopback is private to this
+# workspace. Host container interfaces (docker0, veth*, CNI) suggest host
+# networking on a shared machine. A VM workspace running Docker also matches,
+# so only warn.
 if compgen -G "$NET_SYS_DIR/docker0" > /dev/null \
   || compgen -G "$NET_SYS_DIR/veth*" > /dev/null \
   || compgen -G "$NET_SYS_DIR/cni*" > /dev/null \
@@ -386,6 +387,9 @@ if [[ -f "$PID_FILE" ]] && crdb_running "$(cat "$PID_FILE")"; then
 fi
 rm -f "$PID_FILE"
 mkdir -p "$STORE_PATH" "$(dirname "$LOG_FILE")"
+# The log is append-only, so remember where this run's output begins.
+LOG_START="$(wc -c < "$LOG_FILE" 2> /dev/null || echo 0)"
+LOG_START=$((LOG_START + 0))
 echo "Starting CockroachDB..."
 # No diagnostics reporting: workspaces may sit inside a no-egress perimeter.
 COCKROACH_SKIP_ENABLING_DIAGNOSTIC_REPORTING=true nohup "$BINARY_PATH" start-single-node \
@@ -405,7 +409,7 @@ while ((SECONDS < TIMEOUT)); do
   if ! kill -0 "$CHILD" 2> /dev/null; then
     echo "CockroachDB exited before becoming ready. Last log lines:" >&2
     tail -n 20 "$LOG_FILE" >&2 || true
-    if tail -n 20 "$LOG_FILE" 2> /dev/null | grep -qi 'address already in use'; then
+    if tail -c "+$((LOG_START + 1))" "$LOG_FILE" 2> /dev/null | grep -qi 'address already in use'; then
       echo "Another process is using port $SQL_PORT or $HTTP_PORT. Set sql_port / http_port in the module block." >&2
     fi
     echo "Full log: $LOG_FILE" >&2

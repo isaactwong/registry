@@ -1577,6 +1577,24 @@ describe("module scripts", () => {
     expect(r.out).not.toContain("Another process is using port");
   });
 
+  it("does not blame the port for a stale log line from an earlier run", async () => {
+    linuxAmd64();
+    stub("curl", "exit 22");
+    plantFakeBinary(
+      DEFAULT_VERSION,
+      '#!/bin/sh\n[ "$1" = version ] && exit 0\necho "ERROR: boom" >&2\nexit 1\n',
+    );
+    mkdirSync(join(root(), "logs"), { recursive: true });
+    writeFileSync(
+      join(root(), "logs", "cockroach.log"),
+      "ERROR: listen tcp 127.0.0.1:26257: address already in use\n",
+    );
+    const r = await run(env({ READY_TIMEOUT: "30" }));
+    expect(r.exitCode).not.toBe(0);
+    expect(r.out).toContain("exited before becoming ready");
+    expect(r.out).not.toContain("Another process is using port");
+  });
+
   it("leaves no partial binary when extraction fails", async () => {
     linuxAmd64();
     stub(
