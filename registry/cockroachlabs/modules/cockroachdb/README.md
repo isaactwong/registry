@@ -192,8 +192,10 @@ the loopback interface is private.
 
 ## Resource sizing
 
-A single CockroachDB process uses about 512 MB–1 GB of RAM at rest and grows with
-workload. A 2 CPU / 4 GB workspace is comfortable for typical dev-loop use.
+A single CockroachDB process uses about 800 MiB of resident memory and 5-10% of
+one core when idle, measured on a 2 CPU / 4 GB workspace. Plan for about 1 GiB
+plus your workload. A 2 CPU / 4 GB workspace is comfortable for typical
+dev-loop use.
 
 ## Platform support
 
@@ -231,6 +233,21 @@ Check that `crdb_version` exists and that the mirror serves it. For any other
 failure, such as a blocked network, the script fails with `Could not download
 <url>. On restricted networks, set binary_url to an internal mirror or bake
 cockroach into the image.` See [Restricted networks](#restricted-networks).
+
+**TLS-inspecting proxy.** On a network that inspects TLS (a corporate proxy),
+the download fails with a certificate error from `curl`, followed by the
+module's message:
+
+```text
+curl: (60) SSL certificate problem: unable to get local issuer certificate
+Could not download <url>. On restricted networks, set binary_url to an internal
+mirror or bake cockroach into the image.
+```
+
+> [!TIP]
+> Add the proxy's CA certificate to the workspace image's system trust store
+> (for example `update-ca-certificates` on Debian and Ubuntu); `curl` uses it.
+> Or set `binary_url` to an internal mirror that the workspace already trusts.
 
 **Not ready in time.** The script fails with `CockroachDB not ready after Ns.`
 and prints the last log lines. The process was still running but it hadn't

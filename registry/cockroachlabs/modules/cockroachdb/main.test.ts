@@ -1395,8 +1395,7 @@ describe("module scripts", () => {
     expect(r.exitCode).toBe(0);
     await stopDb();
   };
-  const hasBinary = (v: string) =>
-    existsSync(join(versionDir(v), "cockroach"));
+  const hasBinary = (v: string) => existsSync(join(versionDir(v), "cockroach"));
   const previous = () =>
     readFileSync(join(stateDir(), "previous_version"), "utf-8").trim();
 
@@ -1431,9 +1430,7 @@ describe("module scripts", () => {
     );
     const r = await run(env(), { vars: { crdb_version: "v0.0.1" } });
     expect(r.exitCode).toBe(0);
-    expect(readFileSync(join(home, "curl.log"), "utf-8")).not.toContain(
-      ".tgz",
-    );
+    expect(readFileSync(join(home, "curl.log"), "utf-8")).not.toContain(".tgz");
     expect(previous()).toBe("v0.0.2");
     expect(hasBinary("v0.0.2")).toBe(true);
   });
