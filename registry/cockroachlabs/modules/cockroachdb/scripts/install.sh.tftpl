@@ -301,13 +301,29 @@ else
     fi
     rm -rf "$WORK"
     trap - EXIT
+    DOWNLOADED=1
+  fi
 
-    # Remove other downloaded versions, unless a running CockroachDB (per the
-    # PID file) may still be using an old version's files.
+  # Remember the version that was active before this one, so a rollback after a
+  # failed version change needs no download. Recorded only once the binary is
+  # in place.
+  ACTIVE_FILE="$STATE_DIR/active_version"
+  PREVIOUS_FILE="$STATE_DIR/previous_version"
+  LAST_ACTIVE="$(cat "$ACTIVE_FILE" 2> /dev/null || true)"
+  if [[ -n "$LAST_ACTIVE" && "$LAST_ACTIVE" != "$CRDB_VERSION" ]]; then
+    printf '%s\n' "$LAST_ACTIVE" > "$PREVIOUS_FILE"
+  fi
+  printf '%s\n' "$CRDB_VERSION" > "$ACTIVE_FILE"
+
+  # After a download, remove every version except the active one and the
+  # previously active one. Skip it when a running CockroachDB (per the PID
+  # file) may still be using an old version's files.
+  if [[ "$${DOWNLOADED:-0}" -eq 1 ]]; then
+    KEEP_PREVIOUS="$(cat "$PREVIOUS_FILE" 2> /dev/null || true)"
     RUNNING_PID="$(cat "$PID_FILE" 2> /dev/null || true)"
     if [[ -z "$RUNNING_PID" ]] || ! crdb_running "$RUNNING_PID"; then
       for old in "$VERSIONS_DIR"/v*; do
-        [[ -d "$old" && "$old" != "$VERSION_DIR" ]] || continue
+        [[ -d "$old" && "$old" != "$VERSION_DIR" && "$old" != "$VERSIONS_DIR/$KEEP_PREVIOUS" ]] || continue
         rm -rf "$old"
       done
     fi

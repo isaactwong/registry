@@ -57,8 +57,12 @@ Everything the module writes lives under
   `crdb-reset`, and the `crdb-common.sh` they share.
 - `logs/` holds `install.log` and `start.log` from the module scripts, and
   `cockroach.log`, the database's own output.
-- `bin/<version>/` holds a downloaded `cockroach` and its `lib/` directory.
-- `state/` holds `config.env` (the helpers' settings) and `crdb.pid`.
+- `bin/<version>/` holds a downloaded `cockroach` and its `lib/` directory. The
+  module keeps the active version and the one active before it, and removes
+  older ones after a download, so disk use is at most two versions.
+- `state/` holds `config.env` (the helpers' settings), `crdb.pid`, and
+  `active_version` and `previous_version`, which the module uses to decide what
+  to keep.
 - `data/` is the default store.
 
 ## Examples
@@ -272,8 +276,10 @@ some space and re-run the script.
 
 **Changed `crdb_version` and the database won't start.** An older version
 can't open a store created by a newer one, and CockroachDB upgrades one major
-version at a time. Go back to the previous version, or run `crdb-reset` to
-start fresh (this deletes all data).
+version at a time. Go back to the previous version. The module keeps
+it on disk, so rolling back needs no download. Or run `crdb-reset` to start
+fresh (this deletes all data). The module keeps only one previous version, so
+after two changes in a row the earlier one has to be downloaded again.
 
 **Shared-network warning.** The install log shows `WARNING: this workspace may
 share its host's network`. See [Host networking](#host-networking).

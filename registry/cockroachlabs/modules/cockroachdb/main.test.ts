@@ -1358,6 +1358,71 @@ describe("module scripts", () => {
     expect(existsSync(pidFile())).toBe(true);
   });
 
+  const stopDb = async () => {
+    await $`kill ${readFileSync(pidFile(), "utf-8").trim()}`.nothrow().quiet();
+    rmSync(pidFile());
+  };
+  const installVersion = async (version: string) => {
+    await serveTarball(true, version);
+    const r = await run(env(), { vars: { crdb_version: version } });
+    expect(r.exitCode).toBe(0);
+    await stopDb();
+  };
+  const hasBinary = (v: string) =>
+    existsSync(join(versionDir(v), "cockroach"));
+  const previous = () =>
+    readFileSync(join(stateDir(), "previous_version"), "utf-8").trim();
+
+  it("keeps the previous version after a version change", async () => {
+    linuxAmd64();
+    await installVersion("v0.0.1");
+    expect(existsSync(join(stateDir(), "previous_version"))).toBe(false);
+    await installVersion("v0.0.2");
+    expect(hasBinary("v0.0.1")).toBe(true);
+    expect(hasBinary("v0.0.2")).toBe(true);
+    expect(previous()).toBe("v0.0.1");
+  });
+
+  it("keeps only the active and the previously active version", async () => {
+    linuxAmd64();
+    await installVersion("v0.0.1");
+    await installVersion("v0.0.2");
+    await installVersion("v0.0.3");
+    expect(hasBinary("v0.0.1")).toBe(false);
+    expect(hasBinary("v0.0.2")).toBe(true);
+    expect(hasBinary("v0.0.3")).toBe(true);
+    expect(previous()).toBe("v0.0.2");
+  });
+
+  it("rolls back to the kept version without downloading", async () => {
+    linuxAmd64();
+    await installVersion("v0.0.1");
+    await installVersion("v0.0.2");
+    stub(
+      "curl",
+      'echo "$@" >> "$HOME/curl.log"; case "$*" in *health*) exit 0;; esac; exit 22',
+    );
+    const r = await run(env(), { vars: { crdb_version: "v0.0.1" } });
+    expect(r.exitCode).toBe(0);
+    expect(readFileSync(join(home, "curl.log"), "utf-8")).not.toContain(
+      ".tgz",
+    );
+    expect(previous()).toBe("v0.0.2");
+    expect(hasBinary("v0.0.2")).toBe(true);
+  });
+
+  it("does not record a version whose download failed", async () => {
+    linuxAmd64();
+    await installVersion("v0.0.1");
+    stub("sha256sum", "exit 0");
+    stub("curl", "exit 22");
+    const failed = await run(env(), { vars: { crdb_version: "v0.0.2" } });
+    expect(failed.installCode).not.toBe(0);
+    await installVersion("v0.0.3");
+    expect(hasBinary("v0.0.1")).toBe(true);
+    expect(previous()).toBe("v0.0.1");
+  });
+
   it("keeps old versions while a CockroachDB process may still use them", async () => {
     linuxAmd64();
     await serveTarball(true);
