@@ -203,13 +203,14 @@ describe("module scripts", () => {
   });
 
   afterEach(async () => {
+    // SIGKILL, not SIGTERM: a fake that traps TERM can outlive the test.
     if (existsSync(pidFile())) {
-      await $`kill ${readFileSync(pidFile(), "utf-8").trim()}`
+      await $`kill -9 ${readFileSync(pidFile(), "utf-8").trim()}`
         .nothrow()
         .quiet();
     }
     // Reap any fake cockroach whose PID file was overwritten by a test.
-    await $`pkill -f ${home}/`.nothrow().quiet();
+    await $`pkill -9 -f ${home}/`.nothrow().quiet();
     for (const pid of extraPids.splice(0)) {
       try {
         process.kill(pid, "SIGKILL");
@@ -487,6 +488,10 @@ describe("module scripts", () => {
 
     const t0 = Date.now();
     const r = await reset();
+    // reset() restarted the database, so the pid file now holds a new fake.
+    if (existsSync(pidFile())) {
+      extraPids.push(Number(readFileSync(pidFile(), "utf-8").trim()));
+    }
 
     expect(r.stderr.toString()).not.toContain("did not stop");
     expect(r.stdout.toString()).toContain("wiped");
