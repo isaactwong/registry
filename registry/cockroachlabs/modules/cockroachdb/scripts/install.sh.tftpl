@@ -388,7 +388,7 @@ fi
 rm -f "$PID_FILE"
 mkdir -p "$STORE_PATH" "$(dirname "$LOG_FILE")"
 # The log is append-only, so remember where this run's output begins.
-LOG_START="$(wc -c < "$LOG_FILE" 2> /dev/null || echo 0)"
+LOG_START="$({ wc -c < "$LOG_FILE"; } 2> /dev/null || echo 0)"
 LOG_START=$((LOG_START + 0))
 echo "Starting CockroachDB..."
 # No diagnostics reporting: workspaces may sit inside a no-egress perimeter.

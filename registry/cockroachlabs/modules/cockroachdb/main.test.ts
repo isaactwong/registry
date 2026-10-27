@@ -708,6 +708,16 @@ describe("module scripts", () => {
     expect(r.out).toContain("CockroachDB ready");
   });
 
+  it("prints no shell errors on a first start before the log exists", async () => {
+    linuxAmd64();
+    stub("curl", 'case "$*" in *health*) exit 0;; esac; exit 22');
+    plantFakeBinary(DEFAULT_VERSION);
+    const r = await run();
+    expect(r.exitCode).toBe(0);
+    expect(r.startOut).toContain("CockroachDB ready");
+    expect(r.startOut).not.toContain("No such file or directory");
+  });
+
   it("treats a PID reused by an unrelated process as stale", async () => {
     linuxAmd64();
     stub("curl", "exit 22");
