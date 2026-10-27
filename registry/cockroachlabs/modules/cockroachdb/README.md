@@ -96,8 +96,6 @@ module "cockroachdb" {
 }
 ```
 
-<!-- TODO: confirm whether the DB Console works behind path-based app routing, then keep or remove this example. -->
-
 ## Persistence
 
 Data lives at `$HOME/.coder-modules/cockroachlabs/cockroachdb/data` by
