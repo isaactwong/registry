@@ -258,6 +258,11 @@ seconds). `N` is the time actually waited. Read
 `~/.coder-modules/cockroachlabs/cockroachdb/logs/cockroach.log`, then run
 `crdb-start` to try again. A slow or overloaded workspace is the usual cause.
 
+**Blank DB Console page.** The Console downloads a JavaScript bundle on first
+load. Over a slow or proxied connection, an interrupted download leaves the page
+blank. Refresh the page. If it stays blank, check the browser's developer tools
+Network tab for a failed `bundle.js` or `uiconfig` request.
+
 **Checksum failure.** The script fails with `Checksum verification failed for
 <url>. The download may be corrupt, or the mirror may be out of date.` Re-run
 the script. If it persists, check that the mirror serves the right files for
